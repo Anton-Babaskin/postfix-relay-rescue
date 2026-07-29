@@ -18,6 +18,7 @@
 - [Why the server blocked its own users](#why-the-server-blocked-its-own-users)
 - [Immediate containment](#immediate-containment)
 - [Audit workflow](#audit-workflow)
+- [Evidence outside the mail server](#evidence-outside-the-mail-server)
 - [Safe Postfix recovery](#safe-postfix-recovery)
 - [When an SMTP relay helps](#when-an-smtp-relay-helps)
 - [SPF, DKIM, and DMARC after adding a relay](#spf-dkim-and-dmarc-after-adding-a-relay)
@@ -389,6 +390,60 @@ when recipients are unrelated or should not share the same business thread.
 
 ---
 
+## Evidence outside the mail server
+
+Postfix and Dovecot logs describe mail that passed through your infrastructure.
+They cannot observe every event that can affect domain reputation.
+
+Two important blind spots remain:
+
+- a third party can spoof the visible `From` domain while sending from an
+  unrelated server or botnet;
+- a dropped and re-registered domain can inherit reputation from activity that
+  happened before the current registration.
+
+DMARC aggregate reports can reveal sending IPs observed by participating
+receivers, including sources that never touched your server:
+
+```bash
+dig +short TXT _dmarc.example.com
+```
+
+Look for an aggregate reporting destination:
+
+```text
+rua=mailto:dmarc@example.com
+```
+
+If reports were not collected during the incident, that historical visibility
+cannot be reconstructed later. Even when `rua` is configured, reports are
+limited to receivers that generate them and are not a complete record of every
+spoofed message.
+
+Move toward `p=reject` only after every legitimate sender is aligned and the
+aggregate reports have been reviewed. A typical final policy is:
+
+```text
+v=DMARC1; p=reject; pct=100; rua=mailto:dmarc@example.com
+```
+
+Check registration and public-history evidence separately:
+
+```bash
+whois example.com | grep -iE 'creation|created|registered'
+```
+
+Also inspect historical DNS, web archives, certificate-transparency history,
+and search results. A current WHOIS creation date does not prove that the domain
+had no earlier registration or reputation.
+
+> [!IMPORTANT]
+> A clean local audit can rule out compromise, an open relay, and an outbound
+> blast on the inspected server. It cannot by itself rule out off-server
+> spoofing, a silent spamtrap, or inherited reputation.
+
+---
+
 ## Safe Postfix recovery
 
 ### 1. Back up the active configuration
@@ -480,7 +535,7 @@ Require TLS for this next hop without replacing the server's global TLS
 policy:
 
 ```bash
-sudo install -m 0600 /dev/null /etc/postfix/relay_tls_policy
+sudo install -m 0644 /dev/null /etc/postfix/relay_tls_policy
 sudoedit /etc/postfix/relay_tls_policy
 ```
 
@@ -494,6 +549,9 @@ Then:
 
 ```bash
 sudo postmap /etc/postfix/relay_tls_policy
+sudo chmod 0644 \
+  /etc/postfix/relay_tls_policy \
+  /etc/postfix/relay_tls_policy.db
 
 sudo postconf -e 'relayhost = [smtp.provider.example]:587'
 sudo postconf -e 'smtp_sasl_auth_enable = yes'
@@ -529,6 +587,27 @@ parameters. Remove the stale duplicate and keep one intentional definition.
 
 The relay must be authorized by the domain's existing SPF policy.
 
+### Treat relay activation and SPF as one change
+
+Do not route production mail through a new relay before its sending
+infrastructure is authorized by SPF and the updated record is visible from
+external resolvers.
+
+During this incident, the relay was enabled before the provider include had
+been added and propagated. The relay later reported an internal
+`SPF_RECENT_FAILURE_REDIS` score. The provider does not document that
+proprietary rule, so its exact calculation cannot be proven, but the chronology
+is consistent with recent SPF failures being cached and contributing to the
+rejection.
+
+The safe sequence is:
+
+1. merge the provider mechanism into the existing SPF record;
+2. wait until authoritative and external resolvers return the new record;
+3. verify that the provider's sending IP passes SPF;
+4. only then change `relayhost`;
+5. send one controlled message and inspect the received headers.
+
 Check the current record:
 
 ```bash
@@ -550,8 +629,13 @@ Also verify:
 - the original server remains authorized if direct delivery is still possible;
 - DKIM still signs with the organizational domain;
 - SPF or DKIM aligns with the visible `From` domain for DMARC;
-- the expanded SPF policy remains within the RFC limit of ten DNS-triggering
-  mechanisms and modifiers.
+- the complete recursive evaluation stays within the RFC limit of ten
+  DNS-triggering terms.
+
+The ten-term SPF limit counts `a`, `mx`, `ptr`, `exists`, and `include`
+mechanisms plus the `redirect` modifier. It does not count `ip4`, `ip6`, `all`,
+or the `exp` modifier. Provider `include` records consume the budget
+recursively, including any nested mechanisms and redirects they evaluate.
 
 After DNS propagation, send a message to a test mailbox and inspect the actual
 headers:
@@ -611,6 +695,9 @@ retry. Confirm the message in the inbound Postfix log before changing filters.
 
 ### 1. Verify DBL state
 
+Query through the server's normal local resolver. Do not use `@8.8.8.8`,
+`@1.1.1.1`, or another public resolver for Spamhaus's public DNSBL service:
+
 ```bash
 dig +short example.com.dbl.spamhaus.org A
 ```
@@ -623,9 +710,17 @@ Interpret the relevant responses:
 | `127.0.1.2` | Spam domain |
 | `127.0.1.102` | Abused legitimate domain used in spam |
 | `127.0.1.255` | Invalid IP-style query to DBL; do not treat it as a domain listing |
+| `127.255.255.252` | Typing error in the DNSBL name; the query is invalid |
+| `127.255.255.254` | Query through a public/open resolver; the result is invalid |
+| `127.255.255.255` | Excessive query volume; the result is invalid |
 
-Use the official web checker for the authoritative removal workflow. Do not
-automate requests against the Spamhaus website.
+The `127.255.255.*` responses are errors, not reputation listings. Use the
+official web checker for the authoritative removal workflow. Do not automate
+requests against the Spamhaus website.
+
+In this incident, the verification message was initially greylisted, then
+retried successfully. Spamhaus completed the removal, and the DBL query stopped
+returning a listing code.
 
 ### 2. Send one controlled test message
 
@@ -758,8 +853,9 @@ The audit did **not** establish the exact trigger for the DBL listing. That is a
 important distinction.
 
 Mail logs can rule out many causes and expose delivery patterns, but they cannot
-prove whether a recipient was a silent spamtrap or reveal every signal used by
-a reputation provider. The defensible conclusion was:
+prove whether a recipient was a silent spamtrap, observe spoofed messages sent
+through someone else's infrastructure, reveal inherited reputation, or expose
+every signal used by a reputation provider. The defensible conclusion was:
 
 > No evidence of compromise, open relay, bulk sending, or recipient failure was
 > found in the available server evidence. The exact external reputation trigger
@@ -786,6 +882,7 @@ That conclusion is more useful than blaming a user without evidence.
 - [ ] Count messages separately from envelope recipients.
 - [ ] Review bounces, deferrals, and DSNs.
 - [ ] Inspect suspicious content and recipient history.
+- [ ] Review DMARC aggregate reports and domain-history evidence.
 - [ ] Record what is proven and what remains unknown.
 
 ### Recover
@@ -795,7 +892,7 @@ That conclusion is more useful than blaming a user without evidence.
 - [ ] Permit authenticated and intentionally trusted local clients before RHSBL.
 - [ ] Keep DBL filtering for untrusted external senders.
 - [ ] Add a relay only when it addresses the actual failure mode.
-- [ ] Merge the relay into the existing SPF record.
+- [ ] Publish and verify relay SPF authorization before changing `relayhost`.
 - [ ] Verify SPF, DKIM, and DMARC from received headers.
 - [ ] Submit the official Spamhaus removal request.
 - [ ] Re-send messages rejected with `NOQUEUE`.
@@ -804,6 +901,7 @@ That conclusion is more useful than blaming a user without evidence.
 
 - [ ] Monitor Queue IDs, bounce rate, and authenticated source IPs.
 - [ ] Alert on DBL state changes.
+- [ ] Collect and review DMARC aggregate reports.
 - [ ] Rate-limit compromised-account damage.
 - [ ] Re-check Postfix restrictions after platform upgrades.
 - [ ] Maintain `postmaster@` and `abuse@` role accounts.
@@ -815,10 +913,12 @@ That conclusion is more useful than blaming a user without evidence.
 
 - [Spamhaus Domain Blocklist](https://www.spamhaus.org/blocklists/domain-blocklist/)
 - [Spamhaus DBL FAQ and return codes](https://www.spamhaus.org/faqs/domain-blocklist/)
+- [Spamhaus public-mirror error codes](https://www.spamhaus.org/resource-hub/dnsbl/using-our-public-mirrors-check-your-return-codes-now/)
 - [Spamhaus IP and Domain Reputation Checker](https://check.spamhaus.org/)
 - [Postfix SMTP relay and access control](https://www.postfix.org/SMTPD_ACCESS_README.html)
 - [Postfix configuration parameters](https://www.postfix.org/postconf.5.html)
 - [RFC 7208: Sender Policy Framework](https://datatracker.ietf.org/doc/html/rfc7208)
+- [DMARC overview and aggregate reporting](https://dmarc.org/overview/)
 - [postfix-relay-rescue](https://github.com/Anton-Babaskin/postfix-relay-rescue)
 
 ---
