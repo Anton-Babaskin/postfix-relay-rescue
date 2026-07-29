@@ -35,6 +35,12 @@ does not remove a domain from DBL. The domain is still visible in the envelope,
 2. It can let authenticated local users pass the sender-RHSBL check while
    keeping external inbound filtering and sender-login anti-spoofing active.
 
+> [!TIP]
+> Read the complete
+> [Spamhaus DBL and Postfix incident runbook](docs/spamhaus-dbl-postfix-recovery.md)
+> for the forensic audit workflow, safe recovery sequence, delisting process,
+> and end-to-end validation checklist.
+
 ## Features
 
 - Interactive menu and automation-friendly CLI.
