@@ -1,0 +1,48 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+      - "release/**"
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  shell:
+    name: Bash, ShellCheck, smoke tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Install ShellCheck
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes shellcheck
+
+      - name: Validate Bash syntax
+        run: |
+          bash -n \
+            postfix-relay-rescue.sh \
+            tests/run-smoke.sh \
+            tests/mock-bin/prr-mock
+
+      - name: Run ShellCheck
+        run: |
+          shellcheck -x \
+            postfix-relay-rescue.sh \
+            tests/run-smoke.sh \
+            tests/mock-bin/prr-mock
+
+      - name: Run mocked smoke tests
+        run: bash tests/run-smoke.sh
