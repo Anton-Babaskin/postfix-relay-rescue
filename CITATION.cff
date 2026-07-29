@@ -1,0 +1,19 @@
+cff-version: 1.2.0
+message: "If this project helped your infrastructure work, cite the software and link to the repository."
+title: "postfix-relay-rescue"
+type: software
+version: 1.0.0
+date-released: 2026-07-29
+authors:
+  - family-names: Babaskin
+    given-names: Anton
+url: "https://github.com/Anton-Babaskin/postfix-relay-rescue"
+repository-code: "https://github.com/Anton-Babaskin/postfix-relay-rescue"
+license: MIT
+keywords:
+  - mail-in-a-box
+  - postfix
+  - smtp-relay
+  - spamhaus
+  - email-deliverability
+  - bash

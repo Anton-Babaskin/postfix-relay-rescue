@@ -1,0 +1,7 @@
+upload/
+.DS_Store
+*.swp
+*.swo
+*~
+coverage/
+dist/
