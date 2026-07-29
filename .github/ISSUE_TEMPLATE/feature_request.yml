@@ -1,0 +1,44 @@
+name: Feature request
+description: Propose a focused improvement / Предложить улучшение
+title: "[Feature]: "
+labels:
+  - enhancement
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem / Проблема
+      description: What operational problem should this solve?
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior / Предлагаемое поведение
+      description: Include expected CLI behavior and safe failure behavior.
+    validations:
+      required: true
+
+  - type: textarea
+    id: safety
+    attributes:
+      label: Postfix and security impact / Влияние на Postfix и безопасность
+      description: Explain modified files, secrets, validation, and rollback.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives / Альтернативы
+
+  - type: checkboxes
+    id: scope
+    attributes:
+      label: Scope / Границы
+      options:
+        - label: The request fits Postfix relay or sender-RHSBL recovery.
+          required: true
+        - label: The request does not require storing credentials in the repository.
+          required: true
