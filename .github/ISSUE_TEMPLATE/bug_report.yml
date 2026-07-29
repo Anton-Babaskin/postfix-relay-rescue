@@ -1,0 +1,83 @@
+name: Bug report
+description: Report reproducible incorrect or unsafe behavior / Сообщить о воспроизводимой ошибке
+title: "[Bug]: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Remove credentials, private email content, customer data, and other secrets.
+        Удалите пароли, частную переписку, данные клиентов и другие секреты.
+
+  - type: input
+    id: version
+    attributes:
+      label: Script version / Версия скрипта
+      placeholder: "1.0.0"
+    validations:
+      required: true
+
+  - type: input
+    id: platform
+    attributes:
+      label: Platform / Платформа
+      description: OS, mail-stack or Mail-in-a-Box version, and Postfix version
+      placeholder: "Ubuntu 24.04, standalone or MIAB x.y, Postfix 3.x"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: command
+    attributes:
+      label: Affected command / Проблемная команда
+      options:
+        - setup
+        - relay-on
+        - relay-off
+        - fix-submission
+        - status
+        - spf
+        - watch
+        - test
+        - backups
+        - restore
+        - interactive menu
+        - other
+    validations:
+      required: true
+
+  - type: textarea
+    id: description
+    attributes:
+      label: What happened? / Что произошло?
+      description: Describe the observed and expected behavior.
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Reproduction steps / Шаги воспроизведения
+      render: shell
+    validations:
+      required: true
+
+  - type: textarea
+    id: output
+    attributes:
+      label: Sanitized output / Очищенный вывод
+      description: Never include smtp_sasl_password_maps values or passwords.
+      render: text
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Safety confirmation / Подтверждение безопасности
+      options:
+        - label: I removed credentials and private data from this report.
+          required: true
+        - label: I ran `bash -n postfix-relay-rescue.sh`.
+          required: true
+        - label: This is not a private security vulnerability.
+          required: true
