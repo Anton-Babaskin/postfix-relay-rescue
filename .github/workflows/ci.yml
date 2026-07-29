@@ -45,4 +45,9 @@ jobs:
             tests/mock-bin/prr-mock
 
       - name: Run mocked smoke tests
-        run: bash tests/run-smoke.sh
+        run: |
+          chmod +x \
+            postfix-relay-rescue.sh \
+            tests/run-smoke.sh \
+            tests/mock-bin/prr-mock
+          sudo bash tests/run-smoke.sh
