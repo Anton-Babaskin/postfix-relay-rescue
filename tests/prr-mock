@@ -1,0 +1,149 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+name="${0##*/}"
+main_cf="${PRR_MAIN_CF:?}"
+
+read_param() {
+    local parameter="$1"
+    awk -v p="$parameter" '
+        /^[[:space:]]*#/ { next }
+        $0 ~ "^[[:space:]]*" p "[[:space:]]*=" {
+            line=$0
+            sub("^[[:space:]]*" p "[[:space:]]*=[[:space:]]*", "", line)
+            value=line
+        }
+        END { print value }
+    ' "$main_cf"
+}
+
+set_param() {
+    local assignment="$1"
+    local parameter="${assignment%%=*}"
+    local value="${assignment#*=}"
+    parameter="$(printf '%s' "$parameter" | sed 's/[[:space:]]*$//')"
+    value="$(printf '%s' "$value" | sed 's/^[[:space:]]*//')"
+    awk -v p="$parameter" -v v="$value" '
+        BEGIN { done=0 }
+        /^[[:space:]]*#/ { print; next }
+        $0 ~ "^[[:space:]]*" p "[[:space:]]*=" {
+            if (!done) {
+                print p " = " v
+                done=1
+            }
+            next
+        }
+        { print }
+        END {
+            if (!done) print p " = " v
+        }
+    ' "$main_cf" >"${main_cf}.tmp"
+    mv "${main_cf}.tmp" "$main_cf"
+}
+
+case "$name" in
+    postconf)
+        case "${1:-}" in
+            -h)
+                read_param "$2"
+                ;;
+            -e)
+                shift
+                for assignment in "$@"; do
+                    set_param "$assignment"
+                done
+                ;;
+            -n)
+                cat "$main_cf"
+                ;;
+            -A)
+                printf 'cyrus\n'
+                ;;
+            *)
+                exit 2
+                ;;
+        esac
+        ;;
+    postmap)
+        if [[ "${1:-}" == "-q" ]]; then
+            key="$2"
+            map="${3#hash:}"
+            awk -v wanted="$key" '$1 == wanted {$1=""; sub(/^[[:space:]]+/, ""); print; exit}' "$map"
+        else
+            map="${1#hash:}"
+            cp "$map" "${map}.db"
+        fi
+        ;;
+    postfix)
+        case "${1:-}" in
+            check)
+                [[ "${PRR_MOCK_POSTFIX_CHECK_FAIL:-0}" != "1" ]]
+                ;;
+            reload|status)
+                exit 0
+                ;;
+            *)
+                exit 2
+                ;;
+        esac
+        ;;
+    systemctl)
+        case "${1:-}" in
+            reload)
+                [[ "${PRR_MOCK_RELOAD_FAIL:-0}" != "1" ]]
+                ;;
+            is-active)
+                [[ "${PRR_MOCK_SYSTEMD_ACTIVE:-1}" == "1" ]]
+                ;;
+            *)
+                exit 0
+                ;;
+        esac
+        ;;
+    dpkg-query)
+        printf 'install ok installed'
+        ;;
+    dig)
+        joined=" $* "
+        if [[ "$joined" == *" A example.com.dbl.spamhaus.org "* ]]; then
+            if [[ "$joined" == *" +noall "* ]]; then
+                printf ';; ->>HEADER<<- opcode: QUERY, status: %s, id: 1\n' \
+                    "${PRR_MOCK_DBL_STATUS:-NXDOMAIN}"
+                if [[ -n "${PRR_MOCK_DBL_ANSWERS:-}" ]]; then
+                    while IFS= read -r answer; do
+                        [[ -n "$answer" ]] \
+                            && printf 'example.com.dbl.spamhaus.org. 60 IN A %s\n' "$answer"
+                    done <<<"$PRR_MOCK_DBL_ANSWERS"
+                fi
+            elif [[ -n "${PRR_MOCK_DBL_ANSWERS:-}" ]]; then
+                printf '%s\n' "$PRR_MOCK_DBL_ANSWERS"
+            fi
+        elif [[ "$joined" == *" TXT example.com "* ]]; then
+            printf '"%s"\n' "${PRR_MOCK_SPF_RECORD:-v=spf1 a mx ip4:203.0.113.10 include:spf.relay.example -all}"
+        elif [[ "$joined" == *" TXT spf.relay.example "* ]]; then
+            printf '"%s"\n' "${PRR_MOCK_RELAY_SPF_RECORD:-v=spf1 ip4:198.51.100.0/24 -all}"
+        elif [[ "$joined" == *" TXT spf.generic.example "* ]]; then
+            printf '"%s"\n' "${PRR_MOCK_GENERIC_SPF_RECORD:-v=spf1 ip4:198.51.100.0/24 -all}"
+        else
+            :
+        fi
+        ;;
+    postqueue)
+        if [[ -n "${PRR_MOCK_POSTQUEUE_LOG:-}" ]]; then
+            printf '%s\n' "$*" >>"$PRR_MOCK_POSTQUEUE_LOG"
+        fi
+        printf 'Mail queue is empty\n'
+        ;;
+    ip)
+        printf '1.0.0.3 via 203.0.113.1 dev eth0 src 203.0.113.10 uid 0\n'
+        ;;
+    hostname)
+        printf 'box.example.com\n'
+        ;;
+    sendmail)
+        exit 0
+        ;;
+    *)
+        exit 127
+        ;;
+esac
