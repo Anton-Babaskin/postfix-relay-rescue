@@ -774,7 +774,7 @@ The manual process above is useful for understanding the failure. For repeatable
 changes, use
 [postfix-relay-rescue](https://github.com/Anton-Babaskin/postfix-relay-rescue).
 
-It supports Mail-in-a-Box and standard Postfix, works with MailBaby or another
+It supports Mail-in-a-Box and standard Postfix, works with any hostname-based
 authenticated STARTTLS relay, creates root-only snapshots, validates Postfix,
 rolls back failed changes, audits SPF, traces a real test message, and monitors
 DBL state changes.
