@@ -48,6 +48,10 @@ jobs:
         run: |
           chmod +x \
             postfix-relay-rescue.sh \
+            tests/privacy-scan.sh \
             tests/run-smoke.sh \
             tests/mock-bin/prr-mock
           sudo bash tests/run-smoke.sh
+
+      - name: Reject production IPs and obvious secrets
+        run: bash tests/privacy-scan.sh
