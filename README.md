@@ -44,7 +44,8 @@ does not remove a domain from DBL. The domain is still visible in the envelope,
 ## Features
 
 - Interactive menu and automation-friendly CLI.
-- MailBaby auto-detection plus arbitrary hostname-based SMTP relay support.
+- Auto-detection of an existing Postfix `relayhost`.
+- Provider-neutral hostname-based SMTP relay support.
 - Hidden password prompt or strict root-owned password file.
 - Exact-key credential replacement for safe password rotation.
 - Mandatory TLS for the relay through `smtp_tls_policy_maps`.
@@ -70,8 +71,8 @@ does not remove a domain from DBL. The domain is still visible in the envelope,
 - Automatic rollback if `postfix check`, reload, or service health fails.
 - Rebuilds restored Postfix hash databases from their source maps.
 - DBL, ZEN, relay, TLS-map, SASL-map, queue, and duplicate-key audit.
-- SPF include validation and recursive 10-DNS-lookup budget check.
-- MailBaby current and legacy SPF include support.
+- Provider-supplied SPF include validation and recursive 10-DNS-lookup budget
+  check without guessing provider settings.
 - Real test message with Queue ID and next-hop status tracing.
 - DBL state-change watcher suitable for cron or another monitoring system.
 - Mocked smoke tests that never touch the host's real Postfix configuration.
@@ -92,11 +93,11 @@ listing details and removal.
 ## Compatibility
 
 | Platform | v1 status |
-|---|---|
+| --- | --- |
 | Mail-in-a-Box on Ubuntu | Primary tested platform |
 | Standalone Postfix on Debian/Ubuntu | Supported |
-| Standalone Postfix on RHEL/Rocky/AlmaLinux | Experimental; package names and logging differ |
-| mailcow/Docker-generated Postfix | Refused; use the stack's supported templates |
+| Standalone Postfix on RHEL/Rocky/AlmaLinux | Experimental |
+| mailcow/Docker-generated Postfix | Refused; generated configuration |
 | Zimbra | Refused; use Zimbra tooling |
 | Exim, Exchange, other MTAs | Not supported |
 
@@ -148,28 +149,7 @@ The menu can configure a relay, apply only the safe DBL bypass, run both
 operations together, inspect the server, test delivery, restore a snapshot, or
 disable the relay.
 
-### MailBaby
-
-The interactive default is `relay.mailbaby.net:587`:
-
-```bash
-sudo postfix-relay-rescue setup \
-  --host relay.mailbaby.net \
-  --port 587 \
-  --user mb12345 \
-  --domain example.com
-```
-
-The password is requested without echoing it to the terminal. MailBaby is
-automatically associated with:
-
-```text
-include:spf-c.mailbaby.net
-```
-
-The legacy `include:relay.mailbaby.net` is also recognized.
-
-### Any STARTTLS relay
+### Configure any STARTTLS relay
 
 ```bash
 sudo postfix-relay-rescue setup \
@@ -180,8 +160,23 @@ sudo postfix-relay-rescue setup \
   --spf-include spf.provider.example
 ```
 
-The script does not guess a generic provider's SPF include. Obtain it from the
-provider and pass it with `--spf-include`.
+The password is requested without echoing it to the terminal. The script does
+not identify the provider from its hostname and never guesses an SPF include.
+Obtain the exact include from the provider and pass it with `--spf-include`.
+
+If Postfix already has a valid `relayhost`, `setup` and `relay-on` can reuse its
+hostname and port when `--host` is omitted:
+
+```bash
+sudo postfix-relay-rescue relay-on \
+  --user relay-account \
+  --domain example.com \
+  --spf-include spf.provider.example
+```
+
+The credential is still requested securely. Relay auto-detection means reading
+the active Postfix next hop; it does not mean identifying or endorsing a
+commercial provider.
 
 ### Non-interactive password input
 
@@ -255,15 +250,6 @@ v1 refuses to change the global restriction and asks for a manual review.
 
 ## SPF audit
 
-MailBaby:
-
-```bash
-sudo postfix-relay-rescue spf example.com \
-  --spf-include spf-c.mailbaby.net
-```
-
-Generic provider:
-
 ```bash
 sudo postfix-relay-rescue spf example.com \
   --spf-include spf.provider.example
@@ -274,8 +260,6 @@ The audit detects:
 - no SPF record;
 - multiple SPF records and resulting `PermError`;
 - a missing relay-provider include;
-- current or legacy MailBaby includes;
-- missing MailBaby origin authorization hints;
 - nested SPF trees that can exceed the RFC limit of ten DNS lookups.
 
 The script only prints a recommendation. Apply DNS changes through your
@@ -294,8 +278,8 @@ The test creates a unique `Message-ID`, finds the Postfix Queue ID in
 `bounced`. Set `PRR_MAILLOG` if the active file has a different path.
 Journald-only tracing is not supported in v1.
 
-`sent` means accepted by MailBaby or another next hop. For final delivery,
-inspect the relay dashboard and the recipient mailbox headers.
+`sent` means accepted by the next hop. For final delivery, inspect the relay
+dashboard and the recipient mailbox headers.
 
 ## DBL watch mode
 
@@ -314,7 +298,7 @@ Example cron entry:
 Unchanged state is silent. State changes are written to stdout and return:
 
 | Exit code | Meaning |
-|---:|---|
+| ---: | --- |
 | `10` | Domain became listed |
 | `11` | Domain was delisted |
 | `12` | DNS/Spamhaus query error |
@@ -403,7 +387,7 @@ DBL transitions, queue flushing, and relay removal.
 
 - Evidence-oriented incident audit for Postfix/Dovecot logs.
 - Optional notification hooks for DBL state changes.
-- Additional relay-provider validation presets without storing credentials.
+- Relay connectivity and STARTTLS capability preflight checks.
 
 ## Contributing and security
 

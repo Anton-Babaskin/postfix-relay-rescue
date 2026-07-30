@@ -12,7 +12,8 @@ and the project uses [Semantic Versioning](https://semver.org/).
 ### Added
 
 - Interactive and non-interactive authenticated STARTTLS relay setup.
-- Support for MailBaby and arbitrary hostname-based SMTP relay providers.
+- Provider-neutral support for hostname-based SMTP relays.
+- Auto-detection and reuse of an existing Postfix `relayhost`.
 - Per-relay mandatory TLS through `smtp_tls_policy_maps` without replacing the
   host's global `smtp_tls_security_level`.
 - Postfix config-directory and common mail-log path detection.
@@ -23,8 +24,8 @@ and the project uses [Semantic Versioning](https://semver.org/).
 - Root-only credential storage and protected password-file input.
 - Transactional snapshots, automatic rollback, explicit restore, and hash-map
   rebuilding.
-- SPF validation, provider include checks, nested DNS lookup-budget auditing,
-  and MailBaby-specific authorization checks.
+- SPF validation, explicit provider include checks, and nested DNS
+  lookup-budget auditing without provider-specific assumptions.
 - Spamhaus DBL and ZEN status inspection.
 - Real delivery-chain test with queue-ID tracing.
 - Cron-friendly DBL state-change watcher.
