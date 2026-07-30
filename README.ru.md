@@ -1,184 +1,174 @@
-# postfix-relay-rescue
+<div align="center">
+
+# Postfix Relay Rescue
+
+**Независимое от провайдера SMTP-релея восстановление Postfix и безопасный sender-RHSBL bypass**
 
 [![CI](https://github.com/Anton-Babaskin/postfix-relay-rescue/actions/workflows/ci.yml/badge.svg)](https://github.com/Anton-Babaskin/postfix-relay-rescue/actions/workflows/ci.yml)
-[![Release](https://img.shields.io/github/v/release/Anton-Babaskin/postfix-relay-rescue)](https://github.com/Anton-Babaskin/postfix-relay-rescue/releases)
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Shell: Bash](https://img.shields.io/badge/Shell-Bash-4EAA25?logo=gnubash&logoColor=white)](https://www.gnu.org/software/bash/)
+[![Release](https://img.shields.io/github/v/release/Anton-Babaskin/postfix-relay-rescue?display_name=tag&sort=semver)](https://github.com/Anton-Babaskin/postfix-relay-rescue/releases)
+[![License](https://img.shields.io/github/license/Anton-Babaskin/postfix-relay-rescue)](LICENSE)
+[![Shell](https://img.shields.io/badge/shell-Bash-4EAA25?logo=gnubash&logoColor=white)](https://www.gnu.org/software/bash/)
+[![Postfix](https://img.shields.io/badge/MTA-Postfix-336791)](https://www.postfix.org/)
 
-Безопасное подключение резервного SMTP-релея и восстановление отправки при
-срабатывании Spamhaus sender-RHSBL в Postfix. Основная протестированная
-платформа — Mail-in-a-Box.
+[Быстрый запуск](#быстрый-запуск) · [Выбор действия](#выберите-нужное-действие) ·
+[Incident runbook](docs/spamhaus-dbl-postfix-recovery.md) ·
+[English](README.md)
 
-[English documentation](README.md)
+</div>
 
-## Проблема
+---
 
-Некоторые конфигурации Postfix, включая Mail-in-a-Box, размещают проверку
-`reject_rhsbl_sender dbl.spamhaus.org` внутри
-`smtpd_sender_restrictions`. Это ограничение также применяется к
-авторизованной отправке пользователей.
+## Для чего нужен проект
 
-Если собственный домен попадает в Spamhaus DBL, Postfix может отклонять письма
-своих пользователей ещё до того, как их получит настроенный SMTP-релей:
+У похожей проблемы с отправкой могут быть две разные причины:
 
-```text
-554 5.7.1 Sender address blocked using dbl.spamhaus.org
-```
+1. Репутация исходящего IP испорчена, и хороший SMTP-релей может временно
+   восстановить маршрут.
+2. Домен отправителя попал в Spamhaus DBL, после чего локальное правило
+   `reject_rhsbl_sender` начало отклонять собственных авторизованных
+   пользователей ещё до очереди.
 
-SMTP-релей может восстановить доставку, когда проблема связана с репутацией
-исходящего IP. Но он не удаляет домен из DBL: домен остаётся виден в envelope,
-`From`, DKIM, `Message-ID` и URL внутри письма.
+Проект закрывает оба сценария без угадывания провайдера, паролей в shell
+history и замены глобальной TLS-политики сервера.
 
-`postfix-relay-rescue` безопасно решает обе части проблемы:
+> [!IMPORTANT]
+> Релей меняет исходящий IP. Он **не** исправляет листинг домена, не скрывает
+> домен в `From`, DKIM и `Message-ID` и не заменяет процедуру удаления из
+> Spamhaus.
 
-1. Настраивает авторизованный STARTTLS-релей без замены глобальной TLS-политики
-   сервера.
-2. Пропускает локальных авторизованных пользователей мимо sender-RHSBL,
-   сохраняя входящую фильтрацию и защиту от подмены локального отправителя.
+## Выберите нужное действие
 
-## Возможности
+| Что наблюдается | Первое действие | Команда |
+| --- | --- | --- |
+| Релей ещё не проверен | Проверить DNS, TCP, STARTTLS и сертификат | `postfix-relay-rescue preflight` |
+| Проблема в репутации исходящего IP | Подключить авторизованный релей | `postfix-relay-rescue relay-on` |
+| Собственный домен в DBL, локальные пользователи получают `554` | Исправить порядок sender restrictions | `postfix-relay-rescue fix-submission` |
+| Присутствуют обе проблемы | Транзакционно применить релей и bypass | `postfix-relay-rescue setup` |
+| Причина неясна | Сначала провести аудит | `postfix-relay-rescue status` |
+| Изменение неудачно | Восстановить полный снимок | `postfix-relay-rescue restore` |
 
-- Интерактивное меню и CLI для автоматизации.
-- Автоопределение уже настроенного в Postfix параметра `relayhost`.
-- Независимая от провайдера поддержка SMTP-релеев по hostname.
-- Скрытый ввод пароля или строгий root-only файл с паролем.
-- Обновление учётных данных по точному ключу `[host]:port`.
-- Обязательный TLS для релея через `smtp_tls_policy_maps`.
-- Сохранение текущего глобального `smtp_tls_security_level`.
-- Автоопределение каталога конфигурации Postfix.
-- Автоопределение `/var/log/mail.log` или `/var/log/maillog` для трассировки.
-- Использование systemd при активном юните `postfix` и fallback на команду
-  управления Postfix на системах без systemd.
-- Отказ объявлять глобальный sender-RHSBL bypass безопасным, если `master.cf`
-  содержит отдельный override `smtpd_sender_restrictions` для сервиса.
-- Безопасный порядок правил:
+Полная доказательная процедура находится в
+[runbook по инциденту Spamhaus DBL](docs/spamhaus-dbl-postfix-recovery.md).
 
-  ```text
-  reject_authenticated_sender_login_mismatch
-  permit_sasl_authenticated
-  permit_mynetworks
-  reject_rhsbl_sender ...
-  ```
+## Модель безопасности
 
-- Отказ от автоматического `permit_mynetworks`, если `mynetworks` шире
-  loopback-сетей и администратор явно это не подтвердил.
-- Полные root-only снимки всех изменяемых файлов Postfix.
-- Автоматический откат при ошибке `postfix check`, reload или состоянии
-  сервиса.
-- Пересборка восстановленных hash-карт Postfix из текстовых источников.
-- Аудит DBL, ZEN, SPF, relay, TLS-map, SASL-map, очереди и дублирующихся
-  параметров.
-- Проверка указанного провайдером SPF include и вложенного лимита из десяти
-  DNS-запросов без угадывания настроек.
-- Реальное тестовое письмо с отслеживанием Queue ID и результата next hop.
-- Режим наблюдения за изменением DBL для cron или системы мониторинга.
-- Моковые smoke-тесты, не затрагивающие реальную конфигурацию Postfix.
+- Пароль поступает через скрытый prompt или root-only файл `0400`/`0600`.
+- Перед каждой записью создаётся полный root-only снимок.
+- Ошибка `postfix check`, reload или health-check запускает rollback.
+- TLS обязателен только для выбранного next hop через `smtp_tls_policy_maps`.
+- Глобальный `smtp_tls_security_level` не заменяется.
+- Ротация меняет только точную запись `[host]:port`.
+- `reject_authenticated_sender_login_mismatch` остаётся перед permit-правилами.
+- Широкий `mynetworks` требует явного подтверждения администратора.
+- Генерируемые и неоднозначные конфигурации отклоняются.
+- CI блокирует публичные IP, реальные email, приватные ключи, распространённые
+  токены и SMTP URL с учётными данными.
 
-## Чего скрипт не делает
+## Быстрый запуск
 
-- Не удаляет домены или IP из чёрных списков.
-- Не изменяет публичные DNS-записи.
-- Не гарантирует попадание письма во «Входящие».
-- Не считает `status=sent` доказательством конечной доставки. Этот статус
-  означает только, что следующий SMTP-узел принял письмо.
-- В v1 не поддерживает implicit TLS на порту 465. Используйте STARTTLS-порт
-  провайдера, обычно 587 или 2525.
-
-Информацию о листинге и удаление выполняйте через официальный
-[Spamhaus Reputation Checker](https://check.spamhaus.org/).
-
-## Совместимость
-
-| Платформа | Статус в v1 |
-| --- | --- |
-| Mail-in-a-Box на Ubuntu | Основная протестированная платформа |
-| Обычный Postfix на Debian/Ubuntu | Поддерживается |
-| Обычный Postfix на RHEL/Rocky/AlmaLinux | Экспериментально |
-| mailcow/Postfix с генерируемым Docker-конфигом | Отказ: генерируемый конфиг |
-| Zimbra | Отказ: используйте инструменты Zimbra |
-| Exim, Exchange и другие MTA | Не поддерживаются |
-
-Скрипт управляет стандартными параметрами Postfix. Он останавливается, если
-платформа генерирует конфигурацию или per-service override делает изменение
-глобального `main.cf` неоднозначным.
-
-## Требования
-
-- Поддерживаемый сервер Postfix.
-- Bash 4.3 или новее.
-- Root-доступ.
-- `postfix`, `postmap`, `postqueue`, `sendmail`, `flock`, `realpath`, `ip` и
-  `dig`.
-- `libsasl2-modules` для SMTP-аутентификации на релей.
-- Учётная запись SMTP-релея, если требуется relay mode.
-
-Установка основных зависимостей:
-
-```bash
-sudo apt-get update
-sudo apt-get install -y postfix libsasl2-modules dnsutils util-linux
-```
-
-## Установка
+### 1. Установка
 
 ```bash
 git clone https://github.com/Anton-Babaskin/postfix-relay-rescue.git
 cd postfix-relay-rescue
 chmod +x postfix-relay-rescue.sh
-sudo install -m 0755 postfix-relay-rescue.sh /usr/local/sbin/postfix-relay-rescue
+sudo install -m 0755 postfix-relay-rescue.sh \
+  /usr/local/sbin/postfix-relay-rescue
 ```
 
-Перед изменениями проверьте текущее состояние:
+Основные зависимости для Debian/Ubuntu:
+
+```bash
+sudo apt-get update
+sudo apt-get install -y \
+  postfix libsasl2-modules dnsutils util-linux openssl
+```
+
+### 2. Проверка до изменений
 
 ```bash
 sudo postfix-relay-rescue status
 ```
 
-## Быстрый запуск
-
-Открыть интерактивное меню:
+### 3. Preflight релея без учётных данных
 
 ```bash
-sudo postfix-relay-rescue
+postfix-relay-rescue preflight \
+  --host smtp.provider.example \
+  --port 587
 ```
 
-Через меню можно подключить релей, применить только безопасный DBL bypass,
-выполнить обе операции вместе, проверить сервер, отправить тест, восстановить
-снимок или отключить релей.
+Команда проверяет DNS, выполняет реальный SMTP STARTTLS handshake и валидирует
+цепочку сертификата и hostname. Пароль не отправляется, Postfix не изменяется.
 
-### Настройка любого STARTTLS-релея
+### 4. Сначала опубликуйте SPF-авторизацию релея
+
+Получите точный include у провайдера и не угадывайте его:
+
+```text
+v=spf1 mx include:spf.provider.example -all
+```
+
+Затем проверьте вложенный SPF-бюджет:
+
+```bash
+sudo postfix-relay-rescue spf example.com \
+  --spf-include spf.provider.example
+```
+
+> [!WARNING]
+> Если включить релей до его авторизации в SPF, появятся новые SPF failures и
+> ситуация может ухудшиться. Лимит RFC из 10 DNS-запросов учитывает `a`, `mx`,
+> `ptr`, `exists`, `include` и `redirect`; вложенные include провайдера
+> расходуют тот же бюджет.
+
+### 5. Настройка релея и безопасного DBL bypass
 
 ```bash
 sudo postfix-relay-rescue setup \
   --host smtp.provider.example \
-  --port 2525 \
+  --port 587 \
   --user relay-account \
   --domain example.com \
   --spf-include spf.provider.example
 ```
 
-Пароль запрашивается без отображения в терминале. Скрипт не определяет
-провайдера по hostname и никогда не угадывает SPF include. Получите точное
-значение у провайдера и передайте его через `--spf-include`.
+Пароль запрашивается без отображения. Hostname рассматривается как обычный
+SMTP endpoint: скрипт не определяет, не рекламирует и не настраивает
+специфичный коммерческий сервис.
 
-Если в Postfix уже задан корректный `relayhost`, команды `setup` и `relay-on`
-могут переиспользовать его hostname и порт без параметра `--host`:
+### 6. Проверка цепочки доставки
 
 ```bash
-sudo postfix-relay-rescue relay-on \
-  --user relay-account \
-  --domain example.com \
-  --spf-include spf.provider.example
+sudo postfix-relay-rescue test test-recipient@example.net \
+  --from postmaster@example.com \
+  --timeout 90
 ```
 
-Учётные данные по-прежнему запрашиваются безопасно. Автоопределение означает
-чтение активного next hop из Postfix, а не определение или продвижение
-коммерческого провайдера.
+`status=sent` означает только приём следующим SMTP-узлом. Проверяйте заголовки
+полученного письма и, при наличии, панель релея.
 
-### Неинтерактивный ввод пароля
+## Команды
 
-Не передавайте SMTP-пароль в аргументах, переменных окружения, shell history
-или CI-логах.
+| Команда | Назначение |
+| --- | --- |
+| `preflight` | DNS, TCP, STARTTLS, доверие сертификату и hostname релея |
+| `setup` | Релей и безопасный sender-RHSBL bypass |
+| `relay-on` | Настройка или ротация авторизованного STARTTLS-релея |
+| `relay-off` | Возврат к direct delivery и опциональное удаление credentials |
+| `fix-submission` | Permit авторизованных/local клиентов до sender RHSBL |
+| `status` | Аудит DBL, ZEN, SPF, Postfix, карт, очереди и дублей |
+| `spf` | Проверка include и вложенного DNS lookup budget |
+| `watch` | Изменения DBL для cron/мониторинга |
+| `test` | Контрольное письмо и трассировка Queue ID |
+| `backups` | Список полных снимков |
+| `restore` | Восстановление снимка и пересборка hash-карт |
+
+```bash
+postfix-relay-rescue help
+```
+
+### Безопасный неинтерактивный пароль
 
 ```bash
 sudo install -m 0600 /dev/null /root/relay-password
@@ -193,210 +183,129 @@ sudo postfix-relay-rescue relay-on \
   --spf-include spf.provider.example
 ```
 
-Файл с паролем должен:
+Не помещайте SMTP-пароль в аргументы, environment, shell history, документацию,
+скриншоты, issues или CI logs.
 
-- быть обычным файлом, а не symlink;
-- принадлежать root;
-- иметь строго права `0400` или `0600`;
-- содержать ровно одну непустую строку.
+## Безопасный порядок sender-RHSBL
 
-Повторный `relay-on` заменяет данные для точного активного ключа
-`[host]:port`, не удаляя посторонние записи.
-
-## Команды
+Скрипт сохраняет anti-spoofing и меняет только необходимый порядок:
 
 ```text
-postfix-relay-rescue                         интерактивное меню
-postfix-relay-rescue setup [options]         релей + безопасный DBL bypass
-postfix-relay-rescue relay-on [options]      только настройка релея
-postfix-relay-rescue relay-off               возврат к прямой доставке
-postfix-relay-rescue fix-submission          безопасный sender-RHSBL bypass
-postfix-relay-rescue status [domain]         полный аудит конфигурации и репутации
-postfix-relay-rescue spf [domain]            аудит SPF и лимита DNS-запросов
-postfix-relay-rescue watch [domain]          отслеживание изменений DBL
-postfix-relay-rescue test [recipient]        отправка и трассировка теста
-postfix-relay-rescue backups                 список снимков
-postfix-relay-rescue restore [snapshot]      восстановление снимка
+reject_authenticated_sender_login_mismatch
+permit_sasl_authenticated
+permit_mynetworks
+reject_rhsbl_sender ...
 ```
 
-Все параметры:
+Внешние неавторизованные отправители по-прежнему проверяются. Письма,
+отклонённые как `NOQUEUE`, не попадали в очередь и должны быть отправлены снова.
 
-```bash
-postfix-relay-rescue help
-```
-
-## Только безопасный DBL bypass
-
-Если релей уже настроен, но Postfix отклоняет авторизованных пользователей
-из-за листинга их собственного домена:
-
-```bash
-sudo postfix-relay-rescue fix-submission
-```
-
-Скрипт сохраняет `reject_authenticated_sender_login_mismatch` перед permit-
-правилами. Поэтому авторизованный пользователь не сможет отправлять письмо от
-имени другого локального пользователя.
-
-На стандартном MIAB в `mynetworks` находятся только loopback-сети. Если сервер
-доверяет дополнительным сетям, скрипт предупредит и потребует явного
-подтверждения: любой доверенный адрес также обойдёт sender-RHSBL.
-
-Если `master.cf` переопределяет `smtpd_sender_restrictions` для отдельного
-сервиса, v1 откажется менять глобальное правило и потребует ручной проверки.
-
-## Аудит SPF
-
-```bash
-sudo postfix-relay-rescue spf example.com \
-  --spf-include spf.provider.example
-```
-
-Проверяются:
-
-- отсутствие SPF;
-- несколько SPF-записей и возникающий `PermError`;
-- отсутствие include SMTP-провайдера;
-- вложенное SPF-дерево, превышающее лимит из десяти DNS-запросов.
-
-Скрипт только печатает рекомендацию. Изменения нужно внести у авторитетного
-DNS-провайдера. Пользователи Mail-in-a-Box могут сделать это через Custom DNS.
-
-## Тест цепочки доставки
-
-```bash
-sudo postfix-relay-rescue test test@example.net \
-  --from postmaster@example.com \
-  --timeout 90
-```
-
-Тест создаёт уникальный `Message-ID`, находит Postfix Queue ID в
-`/var/log/mail.log` или `/var/log/maillog` и ожидает `sent`, `deferred` либо
-`bounced`. Если активный файл имеет другой путь, задайте `PRR_MAILLOG`.
-Journald-only трассировка в v1 не поддерживается.
-
-`sent` означает, что следующий SMTP-узел принял письмо. Для проверки конечной
-доставки смотрите панель релея и заголовки письма у получателя.
-
-## Наблюдение за DBL
-
-Первый запуск создаёт базовое состояние:
+## Мониторинг DBL
 
 ```bash
 sudo postfix-relay-rescue watch example.com
 ```
 
-Пример для cron:
-
 ```cron
 */30 * * * * /usr/local/sbin/postfix-relay-rescue watch example.com --flush-on-delist
 ```
 
-При неизменном состоянии вывод отсутствует. При изменениях используются коды:
-
-| Код | Значение |
+| Код | Изменение |
 | ---: | --- |
-| `10` | Домен попал в DBL |
+| `10` | Домен появился в DBL |
 | `11` | Домен удалён из DBL |
 | `12` | Ошибка DNS/запроса Spamhaus |
-| `13` | Запрос восстановился, домен чист |
+| `13` | DNS восстановился, домен чист |
 
-`--flush-on-delist` выполняет `postqueue -f`. Сообщения с `NOQUEUE` никогда не
-попадали в очередь и должны быть отправлены заново вручную.
+Watcher использует локальный resolver хоста. Не проверяйте Spamhaus через
+публичные recursive resolvers: policy error легко принять за код листинга.
 
-## Отключение и восстановление
+## Набор инструментов для почтовых инцидентов
 
-Вернуться к прямой доставке:
+| Проект | Назначение |
+| --- | --- |
+| [postfix-relay-rescue](https://github.com/Anton-Babaskin/postfix-relay-rescue) | Безопасное восстановление Postfix, релей, rollback и DBL monitoring |
+| [mail-sec-audit](https://github.com/Anton-Babaskin/mail-sec-audit) | Read-only аудит хоста, MTA, DNS, TLS, firewall и authentication |
+| [smtp-egress-audit](https://github.com/Anton-Babaskin/smtp-egress-audit) | Привязка неожиданных исходящих SMTP-соединений к процессам и сервисам |
+| [mail_analyzer.sh](https://github.com/Anton-Babaskin/mail_analyzer.sh) | Лёгкая Queue-ID статистика входящих и исходящих доменов |
 
-```bash
-sudo postfix-relay-rescue relay-off
-```
+Инструменты дополняют друг друга. Статистика помогает ориентироваться, но
+выводы требуют логов, Queue ID, DSN, mailbox evidence, DMARC reports и ответов
+репутационного провайдера.
 
-Дополнительно удалить данные только активного релея:
+<details>
+<summary><strong>Совместимость</strong></summary>
 
-```bash
-sudo postfix-relay-rescue relay-off --purge-credentials
-```
+| Платформа | Статус v1 |
+| --- | --- |
+| Mail-in-a-Box на Ubuntu | Основная протестированная платформа |
+| Обычный Postfix на Debian/Ubuntu | Поддерживается |
+| Обычный Postfix на RHEL/Rocky/AlmaLinux | Экспериментально |
+| mailcow/Postfix с генерируемым Docker-конфигом | Отказ; используйте templates |
+| Zimbra | Отказ; используйте Zimbra tooling |
+| Exim, Exchange и другие MTA | Не поддерживаются |
 
-Просмотр и восстановление полных снимков:
+Реализация использует стандартные параметры Postfix и не привязана к
+провайдеру релея. Per-service overrides в `master.cf` отклоняются, если
+глобальное изменение неоднозначно.
+
+</details>
+
+<details>
+<summary><strong>Снимки, восстановление и изменяемые файлы</strong></summary>
 
 ```bash
 sudo postfix-relay-rescue backups
 sudo postfix-relay-rescue restore
-sudo postfix-relay-rescue restore SNAPSHOT_NAME --yes
+sudo postfix-relay-rescue relay-off --purge-credentials
 ```
 
-Перед каждой записью создаётся каталог снимка с правами `0700`:
+Управляются активный `main.cf`, исходные и `.db`-карты SASL, TLS policy,
+несекретный state, root-only snapshots, watcher state и лог скрипта. Каталог
+Postfix определяется через `postconf`.
 
-```text
-/var/backups/postfix-relay-rescue/
-```
+Mail-in-a-Box и другие системы управления могут пересоздать `main.cf`. После
+обновлений выполните `sudo postfix-relay-rescue status`.
 
-В снимок входят `main.cf`, текстовые и `.db`-карты SASL, текстовые и `.db`-
-карты TLS policy, а также несекретные служебные метаданные.
+</details>
 
-## Изменяемые файлы
-
-```text
-/etc/postfix/main.cf
-/etc/postfix/sasl_passwd
-/etc/postfix/sasl_passwd.db
-/etc/postfix/relay_tls_policy
-/etc/postfix/relay_tls_policy.db
-<каталог конфигурации Postfix>/postfix-relay-rescue.state
-/var/backups/postfix-relay-rescue/
-/var/lib/postfix-relay-rescue/
-/var/log/postfix-relay-rescue.log
-```
-
-Служебный state-файл не содержит пароль от релея. Каталог конфигурации
-определяется через `postconf`; выше показан обычный путь Debian/Ubuntu.
-
-## Перегенерация конфигурации
-
-MIAB и другие системы управления конфигурацией могут пересоздать `main.cf`.
-После такого изменения выполните:
+<details>
+<summary><strong>Разработка и privacy checks</strong></summary>
 
 ```bash
-sudo postfix-relay-rescue status
-```
+bash -n \
+  postfix-relay-rescue.sh \
+  tests/run-smoke.sh \
+  tests/mock-bin/prr-mock \
+  tests/privacy-scan.sh
 
-Повторно примените sender-RHSBL bypass, если status сообщает, что собственные
-авторизованные пользователи снова могут быть отклонены.
+shellcheck -x \
+  postfix-relay-rescue.sh \
+  tests/run-smoke.sh \
+  tests/mock-bin/prr-mock \
+  tests/privacy-scan.sh
 
-## Разработка
-
-Локальная проверка:
-
-```bash
-bash -n postfix-relay-rescue.sh tests/run-smoke.sh tests/mock-bin/prr-mock
-shellcheck -x postfix-relay-rescue.sh tests/run-smoke.sh tests/mock-bin/prr-mock
 bash tests/run-smoke.sh
+bash tests/privacy-scan.sh
 ```
 
-Smoke-тест заменяет Postfix, DNS, systemd, очередь и sendmail временными моками.
-Он проверяет ротацию пароля, идемпотентность, автоматический rollback,
-пересборку восстановленных карт, сторонний релей, лимит SPF, изменения DBL,
-flush очереди и отключение релея.
+Smoke suite использует временные моки и не касается рабочей конфигурации
+Postfix.
 
-## План развития
+</details>
 
-- Доказательный анализ инцидентов по логам Postfix/Dovecot.
-- Опциональные уведомления при изменении DBL.
-- Предварительная проверка подключения к релею и возможностей STARTTLS.
+## Границы проекта
 
-## Участие и безопасность
+Проект не удаляет домены/IP из листов, не изменяет authoritative DNS, не
+гарантирует inbox placement, не поддерживает implicit TLS порт 465 и не
+переписывает генерируемую конфигурацию. Для проверки и удаления используйте
+официальный [Spamhaus Reputation Checker](https://check.spamhaus.org/).
 
-Перед Pull Request прочитайте [CONTRIBUTING.md](CONTRIBUTING.md),
-[SECURITY.md](SECURITY.md) и [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md).
+## Участие
 
-Никогда не прикладывайте к публичному issue реальные SMTP-пароли, неочищенные
-SASL-карты или содержимое частной переписки.
+См. [CONTRIBUTING.md](CONTRIBUTING.md), [SECURITY.md](SECURITY.md) и
+[CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md).
 
-## Автор
+## Автор и лицензия
 
-[Anton Babaskin](https://babaskin.dev/)
-
-## Лицензия
-
-[MIT](LICENSE)
+[Anton Babaskin](https://babaskin.dev/) · [MIT](LICENSE)

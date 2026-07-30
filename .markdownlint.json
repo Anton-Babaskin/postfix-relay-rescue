@@ -1,0 +1,13 @@
+{
+  "MD013": false,
+  "MD033": {
+    "allowed_elements": [
+      "details",
+      "div",
+      "strong",
+      "summary"
+    ]
+  },
+  "MD036": false,
+  "MD041": false
+}

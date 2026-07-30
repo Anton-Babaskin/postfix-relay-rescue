@@ -14,6 +14,8 @@ and the project uses [Semantic Versioning](https://semver.org/).
 - Interactive and non-interactive authenticated STARTTLS relay setup.
 - Provider-neutral support for hostname-based SMTP relays.
 - Auto-detection and reuse of an existing Postfix `relayhost`.
+- Credential-free relay preflight for DNS, TCP, SMTP STARTTLS, certificate
+  trust, and certificate hostname validation.
 - Per-relay mandatory TLS through `smtp_tls_policy_maps` without replacing the
   host's global `smtp_tls_security_level`.
 - Postfix config-directory and common mail-log path detection.
@@ -30,6 +32,8 @@ and the project uses [Semantic Versioning](https://semver.org/).
 - Real delivery-chain test with queue-ID tracing.
 - Cron-friendly DBL state-change watcher.
 - Mocked smoke-test suite and GitHub Actions CI.
+- Privacy CI guard for public IP addresses, non-example email addresses,
+  common credential formats, private keys, and credential-bearing SMTP URLs.
 
 [Unreleased]: https://github.com/Anton-Babaskin/postfix-relay-rescue/compare/v1.0.0...HEAD
 [1.0.0]: https://github.com/Anton-Babaskin/postfix-relay-rescue/releases/tag/v1.0.0
