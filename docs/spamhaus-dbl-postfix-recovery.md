@@ -1,18 +1,31 @@
 <!-- markdownlint-disable MD013 -->
 
+<div align="center">
+
 # Recovering a Mail Domain from Spamhaus DBL
+
+**A practical Postfix incident runbook: contain, investigate, recover, delist, and prove the result**
 
 [![Postfix](https://img.shields.io/badge/Postfix-Incident%20Runbook-2C3E50?logo=maildotru&logoColor=white)](https://www.postfix.org/)
 [![Spamhaus DBL](https://img.shields.io/badge/Spamhaus-DBL%20Recovery-F4B400)](https://www.spamhaus.org/blocklists/domain-blocklist/)
 [![Platform](https://img.shields.io/badge/Tested%20on-Mail--in--a--Box-0A66C2)](https://mailinabox.email/)
-[![Automation](https://img.shields.io/badge/Automation-postfix--relay--rescue-4EAA25?logo=gnubash&logoColor=white)](https://github.com/Anton-Babaskin/postfix-relay-rescue)
+[![Privacy](https://img.shields.io/badge/examples-RFC%205737-2E8B57)](https://datatracker.ietf.org/doc/html/rfc5737)
 
-> A production incident runbook for investigating a Spamhaus Domain Blocklist
-> listing, restoring authenticated Postfix submission safely, and proving what
-> did — and did not — happen.
+[Start here](#start-here) · [Audit workflow](#audit-workflow) ·
+[Recovery](#safe-postfix-recovery) · [Tool-assisted workflow](#tool-assisted-workflow)
+
+</div>
+
+---
+
+> [!NOTE]
+> Every hostname, email address, IP address, and Message-ID below is a
+> documentation placeholder. Never publish production mail data, SASL maps,
+> credentials, private headers, or customer identifiers.
 
 ## Table of contents
 
+- [Start here](#start-here)
 - [Incident summary](#incident-summary)
 - [The important distinction: domain vs. IP reputation](#the-important-distinction-domain-vs-ip-reputation)
 - [Why the server blocked its own users](#why-the-server-blocked-its-own-users)
@@ -25,9 +38,27 @@
 - [Spamhaus removal request](#spamhaus-removal-request)
 - [End-to-end validation](#end-to-end-validation)
 - [Automated recovery](#automated-recovery)
+- [Tool-assisted workflow](#tool-assisted-workflow)
 - [What the investigation proved](#what-the-investigation-proved)
 - [Operational checklist](#operational-checklist)
 - [References](#references)
+
+---
+
+## Start here
+
+| Observation | Meaning | Immediate action |
+| --- | --- | --- |
+| Own domain returns a real `127.0.1.x` DBL code | Domain-reputation incident | Contain, audit, and submit a removal request |
+| Origin IP is listed or SMTP/25 is blocked | Route/IP incident | Consider a reputable authenticated relay |
+| Authenticated users receive local `554` + `NOQUEUE` | Postfix self-block before queue | Correct sender-restriction order |
+| `127.255.255.x` is returned | DNSBL policy/query error | Fix the query path; do not treat it as a listing |
+| Trigger is unknown after a clean audit | Normal evidentiary boundary | Record what was disproved and inspect off-server evidence |
+
+> [!IMPORTANT]
+> A relay changes the route and outbound IP, not the sender domain's identity or
+> reputation. Publish and verify relay SPF authorization **before** changing
+> `relayhost`.
 
 ---
 
@@ -102,7 +133,7 @@ not hide the domain in:
 - `Message-ID`;
 - links in the message body.
 
-This was confirmed during the incident. A commercial relay accepted some test
+This was confirmed during the incident. An external relay accepted some test
 messages but rejected another legitimate multi-recipient message. Its scanner
 still assigned a large score to the DBL-listed domain.
 
@@ -806,6 +837,17 @@ sudo postfix-relay-rescue fix-submission
 Configure any authenticated STARTTLS relay:
 
 ```bash
+postfix-relay-rescue preflight \
+  --host smtp.provider.example \
+  --port 587
+```
+
+The preflight sends no credentials and changes no Postfix settings. It verifies
+DNS, TCP, SMTP STARTTLS, the certificate chain, and the certificate hostname.
+
+After the relay passes preflight and its SPF authorization is published:
+
+```bash
 sudo postfix-relay-rescue setup \
   --host smtp.provider.example \
   --port 587 \
@@ -832,6 +874,34 @@ Monitor for a DBL state change:
 
 The script deliberately refuses unsupported generated Postfix stacks and
 ambiguous per-service restriction overrides.
+
+---
+
+## Tool-assisted workflow
+
+Keep recovery, security auditing, egress tracing, and traffic statistics as
+separate evidence layers:
+
+| Project | Role in the incident |
+| --- | --- |
+| [postfix-relay-rescue](https://github.com/Anton-Babaskin/postfix-relay-rescue) | Transactional Postfix recovery, generic relay setup, rollback, SPF checks, and DBL monitoring |
+| [mail-sec-audit](https://github.com/Anton-Babaskin/mail-sec-audit) | Read-only audit of the host, MTA, DNS, TLS, firewall, and authentication posture |
+| [smtp-egress-audit](https://github.com/Anton-Babaskin/smtp-egress-audit) | Correlate unexpected outbound SMTP connections with processes and services |
+| [mail_analyzer.sh](https://github.com/Anton-Babaskin/mail_analyzer.sh) | Produce lightweight Queue-ID-based inbound/outbound domain statistics |
+
+A practical order is:
+
+1. Preserve logs and run the read-only audits.
+2. Use Queue IDs to reconstruct accepted messages and recipient outcomes.
+3. Correct the local self-block and use a relay only for a real route/IP
+   problem.
+4. Complete the official delisting process.
+5. Send one controlled test and verify SPF, DKIM, DMARC, next-hop acceptance,
+   and final mailbox headers.
+
+None of these tools can identify a silent spamtrap or prove an off-server
+spoofing event from local logs alone. `mail_analyzer.sh` is useful for
+orientation; it is not a substitute for forensic correlation.
 
 ---
 
@@ -920,6 +990,9 @@ That conclusion is more useful than blaming a user without evidence.
 - [RFC 7208: Sender Policy Framework](https://datatracker.ietf.org/doc/html/rfc7208)
 - [DMARC overview and aggregate reporting](https://dmarc.org/overview/)
 - [postfix-relay-rescue](https://github.com/Anton-Babaskin/postfix-relay-rescue)
+- [mail-sec-audit](https://github.com/Anton-Babaskin/mail-sec-audit)
+- [smtp-egress-audit](https://github.com/Anton-Babaskin/smtp-egress-audit)
+- [mail_analyzer.sh](https://github.com/Anton-Babaskin/mail_analyzer.sh)
 
 ---
 
