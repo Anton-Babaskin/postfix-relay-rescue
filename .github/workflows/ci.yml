@@ -35,14 +35,16 @@ jobs:
           bash -n \
             postfix-relay-rescue.sh \
             tests/run-smoke.sh \
-            tests/mock-bin/prr-mock
+            tests/mock-bin/prr-mock \
+            tests/privacy-scan.sh
 
       - name: Run ShellCheck
         run: |
           shellcheck -x \
             postfix-relay-rescue.sh \
             tests/run-smoke.sh \
-            tests/mock-bin/prr-mock
+            tests/mock-bin/prr-mock \
+            tests/privacy-scan.sh
 
       - name: Run mocked smoke tests
         run: |
@@ -53,5 +55,5 @@ jobs:
             tests/mock-bin/prr-mock
           sudo bash tests/run-smoke.sh
 
-      - name: Reject production IPs and obvious secrets
+      - name: Reject production identifiers and obvious secrets
         run: bash tests/privacy-scan.sh
