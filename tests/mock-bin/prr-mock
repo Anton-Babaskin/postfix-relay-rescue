@@ -119,13 +119,11 @@ case "$name" in
                 printf '%s\n' "$PRR_MOCK_DBL_ANSWERS"
             fi
         elif [[ "$joined" == *" TXT example.com "* ]]; then
-            printf '"%s"\n' "${PRR_MOCK_SPF_RECORD:-v=spf1 a mx ip4:203.0.113.10 include:spf-c.mailbaby.net -all}"
-        elif [[ "$joined" == *" TXT spf-c.mailbaby.net "* ]]; then
-            printf '"%s"\n' "${PRR_MOCK_MAILBABY_SPF_RECORD:-v=spf1 ip4:198.51.100.0/24 -all}"
+            printf '"%s"\n' "${PRR_MOCK_SPF_RECORD:-v=spf1 a mx ip4:203.0.113.10 include:spf.relay.example -all}"
+        elif [[ "$joined" == *" TXT spf.relay.example "* ]]; then
+            printf '"%s"\n' "${PRR_MOCK_RELAY_SPF_RECORD:-v=spf1 ip4:198.51.100.0/24 -all}"
         elif [[ "$joined" == *" TXT spf.generic.example "* ]]; then
             printf '"%s"\n' "${PRR_MOCK_GENERIC_SPF_RECORD:-v=spf1 ip4:198.51.100.0/24 -all}"
-        elif [[ "$joined" == *" TXT _mailbaby.example.com "* ]]; then
-            :
         else
             :
         fi
@@ -144,6 +142,20 @@ case "$name" in
         ;;
     sendmail)
         exit 0
+        ;;
+    getent)
+        [[ "${PRR_MOCK_DNS_FAIL:-0}" != "1" ]] || exit 2
+        [[ "${1:-}" == "ahosts" ]] || exit 2
+        printf '%s STREAM %s\n' \
+            '192.0.2.25' "$2" \
+            '2001:db8::25' "$2"
+        ;;
+    openssl)
+        [[ "${PRR_MOCK_STARTTLS_FAIL:-0}" != "1" ]] || {
+            printf 'mock STARTTLS handshake failed\n' >&2
+            exit 1
+        }
+        printf 'Verification: OK\n'
         ;;
     *)
         exit 127
