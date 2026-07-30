@@ -63,13 +63,32 @@ while IFS=: read -r file line text; do
     done < <(grep -oE "$IPV4_RE" <<<"$text" || true)
 done < <(git grep -I -n -E -e "$IPV4_RE" -- "${TEXT_GLOBS[@]}" || true)
 
-readonly SECRET_RE='-----BEGIN (RSA |EC |DSA |OPENSSH )?PRIVATE KEY-----|github_pat_[A-Za-z0-9_]{20,}|gh[pousr]_[A-Za-z0-9]{30,}|AKIA[A-Z0-9]{16}'
+readonly SECRET_RE='-----BEGIN (RSA |EC |DSA |OPENSSH )?PRIVATE KEY-----|github_pat_[A-Za-z0-9_]{20,}|gh[pousr]_[A-Za-z0-9]{30,}|AKIA[A-Z0-9]{16}|smtps?://[^[:space:]/]+:[^@[:space:]]+@'
 
 while IFS= read -r match; do
     [[ -n "$match" ]] || continue
     printf '[PRIVACY] possible credential or private key: %s\n' "$match" >&2
     failures=$((failures + 1))
 done < <(git grep -I -n -E -e "$SECRET_RE" -- "${TEXT_GLOBS[@]}" || true)
+
+readonly EMAIL_RE='[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}'
+
+while IFS=: read -r file line text; do
+    [[ -n "$file" ]] || continue
+
+    while IFS= read -r address; do
+        case "${address,,}" in
+            *@example.com | *@example.net | *@example.org | *@*.example.com | \
+            *@*.example.net | *@*.example.org | *@your-test-domain.tld)
+                continue
+                ;;
+        esac
+
+        printf '[PRIVACY] non-example email address must be anonymized: %s:%s: %s\n' \
+            "$file" "$line" "$address" >&2
+        failures=$((failures + 1))
+    done < <(grep -oE "$EMAIL_RE" <<<"$text" || true)
+done < <(git grep -I -n -E -e "$EMAIL_RE" -- "${TEXT_GLOBS[@]}" || true)
 
 if ((failures > 0)); then
     printf '[FAIL] privacy scan found %d issue(s)\n' "$failures" >&2

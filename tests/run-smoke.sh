@@ -8,7 +8,7 @@ trap 'rm -rf "$tmp"' EXIT
 mkdir -p "$tmp/postfix" "$tmp/bin" "$tmp/backups" "$tmp/run" "$tmp/watch"
 cp "$root/tests/fixtures/main.cf" "$tmp/postfix/main.cf"
 
-for command in postconf postmap postfix systemctl dpkg-query dig postqueue ip hostname sendmail; do
+for command in postconf postmap postfix systemctl dpkg-query dig postqueue ip hostname sendmail getent openssl; do
     ln -s "$root/tests/mock-bin/prr-mock" "$tmp/bin/$command"
 done
 
@@ -29,6 +29,25 @@ printf 'old-relay.example [credential]\n' >"$tmp/postfix/sasl_passwd"
 chmod 600 "$tmp/postfix/sasl_passwd"
 printf 'super-secret\n' >"$tmp/password"
 chmod 600 "$tmp/password"
+
+bash "$root/postfix-relay-rescue.sh" preflight \
+    --host smtp.relay.example \
+    --port 587 \
+    --timeout 5 >/dev/null
+
+if PRR_MOCK_DNS_FAIL=1 bash "$root/postfix-relay-rescue.sh" preflight \
+    --host smtp.relay.example \
+    --port 587 >/dev/null 2>&1; then
+    printf 'relay preflight unexpectedly passed with failed DNS\n' >&2
+    exit 1
+fi
+
+if PRR_MOCK_STARTTLS_FAIL=1 bash "$root/postfix-relay-rescue.sh" preflight \
+    --host smtp.relay.example \
+    --port 587 >/dev/null 2>&1; then
+    printf 'relay preflight unexpectedly passed with failed STARTTLS\n' >&2
+    exit 1
+fi
 
 printf '%s\n' \
     'submission inet n - y - - smtpd' \
@@ -57,6 +76,7 @@ grep -q $'^sending_domain\texample.com$' "$tmp/postfix/postfix-relay-rescue.stat
 grep -q $'^spf_include\tspf.relay.example$' "$tmp/postfix/postfix-relay-rescue.state"
 grep -q '^smtp_tls_security_level = dane$' "$tmp/postfix/main.cf"
 grep -q 'hash:.*/relay_tls_policy' "$tmp/postfix/main.cf"
+bash "$root/postfix-relay-rescue.sh" preflight --timeout 5 >/dev/null
 bash "$root/postfix-relay-rescue.sh" status example.com >/dev/null
 PRR_MOCK_SPF_RECORD='v=spf1 a mx include:spf.relay.example -all' \
     bash "$root/postfix-relay-rescue.sh" spf example.com \
