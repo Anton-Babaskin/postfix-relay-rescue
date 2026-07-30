@@ -1,186 +1,177 @@
-# postfix-relay-rescue
+<div align="center">
+
+# Postfix Relay Rescue
+
+**Provider-neutral SMTP relay failover and safe sender-RHSBL recovery for Postfix**
 
 [![CI](https://github.com/Anton-Babaskin/postfix-relay-rescue/actions/workflows/ci.yml/badge.svg)](https://github.com/Anton-Babaskin/postfix-relay-rescue/actions/workflows/ci.yml)
-[![Release](https://img.shields.io/github/v/release/Anton-Babaskin/postfix-relay-rescue)](https://github.com/Anton-Babaskin/postfix-relay-rescue/releases)
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Shell: Bash](https://img.shields.io/badge/Shell-Bash-4EAA25?logo=gnubash&logoColor=white)](https://www.gnu.org/software/bash/)
+[![Release](https://img.shields.io/github/v/release/Anton-Babaskin/postfix-relay-rescue?display_name=tag&sort=semver)](https://github.com/Anton-Babaskin/postfix-relay-rescue/releases)
+[![License](https://img.shields.io/github/license/Anton-Babaskin/postfix-relay-rescue)](LICENSE)
+[![Shell](https://img.shields.io/badge/shell-Bash-4EAA25?logo=gnubash&logoColor=white)](https://www.gnu.org/software/bash/)
+[![Postfix](https://img.shields.io/badge/MTA-Postfix-336791)](https://www.postfix.org/)
 
-Safe SMTP relay failover and Spamhaus sender-RHSBL recovery for Postfix.
-Mail-in-a-Box is the primary tested platform.
+[Quick start](#quick-start) · [Decision guide](#choose-the-right-action) ·
+[Incident runbook](docs/spamhaus-dbl-postfix-recovery.md) ·
+[Русская версия](README.ru.md)
 
-[Русская документация](README.ru.md)
+</div>
 
-## The problem
+---
 
-Some Postfix configurations, including Mail-in-a-Box, place
-`reject_rhsbl_sender dbl.spamhaus.org` inside
-`smtpd_sender_restrictions`. That restriction is also evaluated for
-authenticated message submission.
+## Why this exists
 
-If your own domain appears in Spamhaus DBL, Postfix may reject your own users
-before a configured relay ever receives their messages:
+A Postfix server can suffer two different failures that look similar:
 
-```text
-554 5.7.1 Sender address blocked using dbl.spamhaus.org
-```
+1. The outbound IP loses reputation, so a reputable SMTP relay may restore the
+   route.
+2. The sender domain enters Spamhaus DBL, and a local
+   `reject_rhsbl_sender` rule starts rejecting the server's own authenticated
+   users before their messages reach the queue.
 
-An SMTP relay may restore delivery when the origin IP is the problem, but it
-does not remove a domain from DBL. The domain is still visible in the envelope,
-`From`, DKIM signature, `Message-ID`, and message URLs.
+This project handles both recovery paths without guessing the relay provider,
+putting passwords in shell history, or replacing the server's global TLS
+policy.
 
-`postfix-relay-rescue` handles both sides safely:
+> [!IMPORTANT]
+> A relay changes the outbound IP. It does **not** repair a domain listing,
+> hide the domain in `From`/DKIM/`Message-ID`, or replace the Spamhaus removal
+> process.
 
-1. It can configure an authenticated STARTTLS relay without replacing the
-   host's global SMTP TLS policy.
-2. It can let authenticated local users pass the sender-RHSBL check while
-   keeping external inbound filtering and sender-login anti-spoofing active.
+## Choose the right action
 
-## Features
+| What you observe | First action | Command |
+| --- | --- | --- |
+| Relay endpoint is not yet trusted | Verify DNS, TCP, STARTTLS, and certificate | `postfix-relay-rescue preflight` |
+| Origin IP reputation is the problem | Configure an authenticated relay | `postfix-relay-rescue relay-on` |
+| Own domain is in DBL and local users receive `554` | Fix sender-restriction order | `postfix-relay-rescue fix-submission` |
+| Both failures are present | Apply relay and safe bypass transactionally | `postfix-relay-rescue setup` |
+| Cause is unclear | Audit first; do not change routing blindly | `postfix-relay-rescue status` |
+| Change went wrong | Restore the last complete snapshot | `postfix-relay-rescue restore` |
 
-- Interactive menu and automation-friendly CLI.
-- MailBaby auto-detection plus arbitrary hostname-based SMTP relay support.
-- Hidden password prompt or strict root-owned password file.
-- Exact-key credential replacement for safe password rotation.
-- Mandatory TLS for the relay through `smtp_tls_policy_maps`.
-- Preserves the existing global `smtp_tls_security_level`.
-- Detects the active Postfix configuration directory.
-- Detects `/var/log/mail.log` and `/var/log/maillog` for delivery tracing.
-- Uses systemd when the `postfix` unit is active and falls back to the Postfix
-  control command on non-systemd hosts.
-- Refuses to report a global sender-RHSBL bypass as safe when `master.cf`
-  contains a per-service `smtpd_sender_restrictions` override.
-- Safe ordering of:
+For a full evidence-preserving investigation, use the
+[Spamhaus DBL incident runbook](docs/spamhaus-dbl-postfix-recovery.md).
 
-  ```text
-  reject_authenticated_sender_login_mismatch
-  permit_sasl_authenticated
-  permit_mynetworks
-  reject_rhsbl_sender ...
-  ```
+## Safety model
 
-- Refuses an unattended `permit_mynetworks` bypass when `mynetworks` is wider
-  than loopback unless the administrator explicitly approves it.
-- Complete root-only snapshots of every managed Postfix file.
-- Automatic rollback if `postfix check`, reload, or service health fails.
-- Rebuilds restored Postfix hash databases from their source maps.
-- DBL, ZEN, relay, TLS-map, SASL-map, queue, and duplicate-key audit.
-- SPF include validation and recursive 10-DNS-lookup budget check.
-- MailBaby current and legacy SPF include support.
-- Real test message with Queue ID and next-hop status tracing.
-- DBL state-change watcher suitable for cron or another monitoring system.
-- Mocked smoke tests that never touch the host's real Postfix configuration.
+- Passwords come from a hidden prompt or a root-owned `0400`/`0600` file.
+- Every write starts with a complete root-only snapshot.
+- Failed `postfix check`, reload, or health validation triggers rollback.
+- Relay TLS is enforced per next hop through `smtp_tls_policy_maps`.
+- The existing global `smtp_tls_security_level` is preserved.
+- Credential rotation replaces only the exact `[host]:port` map entry.
+- `reject_authenticated_sender_login_mismatch` stays before permit rules.
+- Broad `mynetworks` values require explicit administrator approval.
+- Generated or ambiguous Postfix configurations are refused.
+- CI rejects public IP addresses, non-example email addresses, private keys,
+  common access-token formats, and credential-bearing SMTP URLs.
 
-## What the script does not do
+## Quick start
 
-- It does not delist domains or IP addresses.
-- It does not edit public DNS records.
-- It does not guarantee inbox placement.
-- It does not treat `status=sent` as proof of inbox delivery. That status only
-  confirms that the next SMTP hop accepted the message.
-- It does not support implicit-TLS port 465 in v1. Use a provider's STARTTLS
-  port, normally 587 or 2525.
-
-Use the official [Spamhaus Reputation Checker](https://check.spamhaus.org/) for
-listing details and removal.
-
-## Compatibility
-
-| Platform | v1 status |
-|---|---|
-| Mail-in-a-Box on Ubuntu | Primary tested platform |
-| Standalone Postfix on Debian/Ubuntu | Supported |
-| Standalone Postfix on RHEL/Rocky/AlmaLinux | Experimental; package names and logging differ |
-| mailcow/Docker-generated Postfix | Refused; use the stack's supported templates |
-| Zimbra | Refused; use Zimbra tooling |
-| Exim, Exchange, other MTAs | Not supported |
-
-The script manages standard Postfix parameters. It deliberately stops when a
-platform generates the configuration or when a per-service restriction
-override makes a global `main.cf` change ambiguous.
-
-## Requirements
-
-- A supported Postfix host.
-- Bash 4.3 or newer.
-- Root access.
-- `postfix`, `postmap`, `postqueue`, `sendmail`, `flock`, `realpath`, `ip`,
-  and `dig`.
-- `libsasl2-modules` for authenticated SMTP relay support.
-- An SMTP relay account if relay mode is required.
-
-Install common dependencies:
-
-```bash
-sudo apt-get update
-sudo apt-get install -y postfix libsasl2-modules dnsutils util-linux
-```
-
-## Installation
+### 1. Install
 
 ```bash
 git clone https://github.com/Anton-Babaskin/postfix-relay-rescue.git
 cd postfix-relay-rescue
 chmod +x postfix-relay-rescue.sh
-sudo install -m 0755 postfix-relay-rescue.sh /usr/local/sbin/postfix-relay-rescue
+sudo install -m 0755 postfix-relay-rescue.sh \
+  /usr/local/sbin/postfix-relay-rescue
 ```
 
-Inspect the current state before changing anything:
+Common Debian/Ubuntu dependencies:
+
+```bash
+sudo apt-get update
+sudo apt-get install -y \
+  postfix libsasl2-modules dnsutils util-linux openssl
+```
+
+### 2. Inspect before changing
 
 ```bash
 sudo postfix-relay-rescue status
 ```
 
-## Quick start
-
-Run the interactive menu:
+### 3. Preflight the relay without credentials
 
 ```bash
-sudo postfix-relay-rescue
+postfix-relay-rescue preflight \
+  --host smtp.provider.example \
+  --port 587
 ```
 
-The menu can configure a relay, apply only the safe DBL bypass, run both
-operations together, inspect the server, test delivery, restore a snapshot, or
-disable the relay.
+This performs DNS resolution and a real SMTP STARTTLS handshake, validates the
+certificate chain and hostname, sends no password, and changes no Postfix
+setting.
 
-### MailBaby
+### 4. Publish relay SPF authorization first
 
-The interactive default is `relay.mailbaby.net:587`:
-
-```bash
-sudo postfix-relay-rescue setup \
-  --host relay.mailbaby.net \
-  --port 587 \
-  --user mb12345 \
-  --domain example.com
-```
-
-The password is requested without echoing it to the terminal. MailBaby is
-automatically associated with:
+Obtain the exact include from the provider. Do not guess it:
 
 ```text
-include:spf-c.mailbaby.net
+v=spf1 mx include:spf.provider.example -all
 ```
 
-The legacy `include:relay.mailbaby.net` is also recognized.
+Then verify the recursive SPF lookup budget:
 
-### Any STARTTLS relay
+```bash
+sudo postfix-relay-rescue spf example.com \
+  --spf-include spf.provider.example
+```
+
+> [!WARNING]
+> Enabling a relay before publishing its SPF authorization can create fresh SPF
+> failures and make the incident worse. The RFC limit of 10 DNS lookups counts
+> `a`, `mx`, `ptr`, `exists`, `include`, and `redirect`; nested provider
+> includes consume the same budget.
+
+### 5. Configure the relay and safe DBL bypass
 
 ```bash
 sudo postfix-relay-rescue setup \
   --host smtp.provider.example \
-  --port 2525 \
+  --port 587 \
   --user relay-account \
   --domain example.com \
   --spf-include spf.provider.example
 ```
 
-The script does not guess a generic provider's SPF include. Obtain it from the
-provider and pass it with `--spf-include`.
+The password is requested without terminal echo. The hostname is treated as a
+generic SMTP endpoint; the script does not identify, advertise, or configure
+any provider-specific product.
 
-### Non-interactive password input
+### 6. Validate the delivery chain
 
-Do not put SMTP passwords in arguments, environment variables, shell history,
-or CI logs.
+```bash
+sudo postfix-relay-rescue test test-recipient@example.net \
+  --from postmaster@example.com \
+  --timeout 90
+```
+
+`status=sent` means the next SMTP hop accepted the message. It does not prove
+inbox placement. Verify the received headers and, when applicable, the relay
+dashboard.
+
+## Commands
+
+| Command | Purpose |
+| --- | --- |
+| `preflight` | Verify relay DNS, TCP, STARTTLS, certificate trust, and hostname |
+| `setup` | Configure relay and safe sender-RHSBL bypass |
+| `relay-on` | Configure or rotate an authenticated STARTTLS relay |
+| `relay-off` | Return to direct delivery; optionally purge the active credential |
+| `fix-submission` | Permit authenticated/local submission before sender RHSBL |
+| `status` | Audit DBL, ZEN, SPF, Postfix, maps, queue, and duplicate keys |
+| `spf` | Validate provider include and recursive DNS-lookup budget |
+| `watch` | Report DBL state transitions for cron/monitoring |
+| `test` | Send a controlled message and trace its Queue ID |
+| `backups` | List complete configuration snapshots |
+| `restore` | Restore a selected snapshot and rebuild hash maps |
+
+```bash
+postfix-relay-rescue help
+```
+
+### Secure non-interactive password input
 
 ```bash
 sudo install -m 0600 /dev/null /root/relay-password
@@ -195,222 +186,135 @@ sudo postfix-relay-rescue relay-on \
   --spf-include spf.provider.example
 ```
 
-The password file must:
+Never place an SMTP password in command arguments, environment variables,
+shell history, documentation, screenshots, issues, or CI logs.
 
-- be a regular non-symlink file;
-- be owned by root;
-- have exactly mode `0400` or `0600`;
-- contain exactly one non-empty line.
+## The safe sender-RHSBL order
 
-Re-running `relay-on` replaces the credential for the exact active
-`[host]:port` key without deleting unrelated entries.
-
-## Commands
+The script changes only the order needed to preserve anti-spoofing and local
+submission:
 
 ```text
-postfix-relay-rescue                         interactive menu
-postfix-relay-rescue setup [options]         relay + safe DBL bypass
-postfix-relay-rescue relay-on [options]      configure relay only
-postfix-relay-rescue relay-off               return to direct delivery
-postfix-relay-rescue fix-submission          apply safe sender-RHSBL bypass
-postfix-relay-rescue status [domain]         full configuration and reputation audit
-postfix-relay-rescue spf [domain]            SPF and DNS lookup-budget audit
-postfix-relay-rescue watch [domain]          report DBL state changes
-postfix-relay-rescue test [recipient]        send and trace a real test message
-postfix-relay-rescue backups                 list snapshots
-postfix-relay-rescue restore [snapshot]      restore a snapshot
+reject_authenticated_sender_login_mismatch
+permit_sasl_authenticated
+permit_mynetworks
+reject_rhsbl_sender ...
 ```
 
-See every option:
+External unauthenticated senders are still checked. Messages previously
+rejected as `NOQUEUE` were never queued and must be sent again.
 
-```bash
-postfix-relay-rescue help
-```
-
-## Safe DBL bypass only
-
-If the relay is already configured and Postfix rejects authenticated users
-because their own sender domain is listed:
-
-```bash
-sudo postfix-relay-rescue fix-submission
-```
-
-The script keeps `reject_authenticated_sender_login_mismatch` before the permit
-rules. An authenticated user therefore cannot send as another local user.
-
-On a standard Mail-in-a-Box host, `mynetworks` contains loopback networks only.
-If the server trusts additional networks, the script warns and requires
-explicit confirmation because every trusted address would bypass sender RHSBL
-checks.
-
-If `master.cf` overrides `smtpd_sender_restrictions` for an individual service,
-v1 refuses to change the global restriction and asks for a manual review.
-
-## SPF audit
-
-MailBaby:
-
-```bash
-sudo postfix-relay-rescue spf example.com \
-  --spf-include spf-c.mailbaby.net
-```
-
-Generic provider:
-
-```bash
-sudo postfix-relay-rescue spf example.com \
-  --spf-include spf.provider.example
-```
-
-The audit detects:
-
-- no SPF record;
-- multiple SPF records and resulting `PermError`;
-- a missing relay-provider include;
-- current or legacy MailBaby includes;
-- missing MailBaby origin authorization hints;
-- nested SPF trees that can exceed the RFC limit of ten DNS lookups.
-
-The script only prints a recommendation. Apply DNS changes through your
-authoritative DNS provider. Mail-in-a-Box users can do this in Custom DNS.
-
-## Delivery-chain test
-
-```bash
-sudo postfix-relay-rescue test test@example.net \
-  --from postmaster@example.com \
-  --timeout 90
-```
-
-The test creates a unique `Message-ID`, finds the Postfix Queue ID in
-`/var/log/mail.log` or `/var/log/maillog`, and waits for `sent`, `deferred`, or
-`bounced`. Set `PRR_MAILLOG` if the active file has a different path.
-Journald-only tracing is not supported in v1.
-
-`sent` means accepted by MailBaby or another next hop. For final delivery,
-inspect the relay dashboard and the recipient mailbox headers.
-
-## DBL watch mode
-
-Establish the first baseline:
+## DBL monitoring
 
 ```bash
 sudo postfix-relay-rescue watch example.com
 ```
 
-Example cron entry:
-
 ```cron
 */30 * * * * /usr/local/sbin/postfix-relay-rescue watch example.com --flush-on-delist
 ```
 
-Unchanged state is silent. State changes are written to stdout and return:
-
-| Exit code | Meaning |
-|---:|---|
+| Exit | State change |
+| ---: | --- |
 | `10` | Domain became listed |
 | `11` | Domain was delisted |
 | `12` | DNS/Spamhaus query error |
 | `13` | Query recovered and domain is clean |
 
-`--flush-on-delist` requests `postqueue -f`. Messages rejected with `NOQUEUE`
-were never queued and must be sent again manually.
+The watcher queries through the host's local resolver. Do not diagnose
+Spamhaus using public recursive resolvers: policy error responses can be
+mistaken for listing codes.
 
-## Disable or restore
+## Mail operations toolkit
 
-Return to direct delivery:
+These repositories cover separate stages of the same incident workflow:
 
-```bash
-sudo postfix-relay-rescue relay-off
-```
+| Project | Use it for |
+| --- | --- |
+| [postfix-relay-rescue](https://github.com/Anton-Babaskin/postfix-relay-rescue) | Safe Postfix recovery, relay configuration, rollback, and DBL monitoring |
+| [mail-sec-audit](https://github.com/Anton-Babaskin/mail-sec-audit) | Read-only host, MTA, DNS, TLS, firewall, and authentication audit |
+| [smtp-egress-audit](https://github.com/Anton-Babaskin/smtp-egress-audit) | Trace unexpected outbound SMTP connections back to processes and services |
+| [mail_analyzer.sh](https://github.com/Anton-Babaskin/mail_analyzer.sh) | Lightweight Queue-ID-based inbound/outbound domain statistics |
 
-Remove only the active relay credential as well:
+The tools complement one another. Statistics are useful for orientation, but
+logs, Queue IDs, DSNs, mailbox evidence, DMARC reports, and provider responses
+remain the sources of forensic conclusions.
 
-```bash
-sudo postfix-relay-rescue relay-off --purge-credentials
-```
+<details>
+<summary><strong>Compatibility</strong></summary>
 
-List and restore complete snapshots:
+| Platform | v1 status |
+| --- | --- |
+| Mail-in-a-Box on Ubuntu | Primary tested platform |
+| Standalone Postfix on Debian/Ubuntu | Supported |
+| Standalone Postfix on RHEL/Rocky/AlmaLinux | Experimental |
+| mailcow/Docker-generated Postfix | Refused; use generated templates |
+| Zimbra | Refused; use Zimbra tooling |
+| Exim, Exchange, other MTAs | Not supported |
+
+The implementation uses standard Postfix parameters; it is not tied to a
+specific relay vendor. Per-service `master.cf` overrides are refused when a
+global change would be ambiguous.
+
+</details>
+
+<details>
+<summary><strong>Snapshots, restore, and managed files</strong></summary>
 
 ```bash
 sudo postfix-relay-rescue backups
 sudo postfix-relay-rescue restore
-sudo postfix-relay-rescue restore SNAPSHOT_NAME --yes
+sudo postfix-relay-rescue relay-off --purge-credentials
 ```
 
-Every write operation first creates a `0700` snapshot directory under:
+Managed paths include the active Postfix `main.cf`, SASL source/database maps,
+relay TLS-policy source/database maps, non-secret state metadata, root-only
+snapshots, watcher state, and the script log. The Postfix configuration
+directory is discovered with `postconf`.
 
-```text
-/var/backups/postfix-relay-rescue/
-```
+Mail-in-a-Box upgrades and other configuration-management systems may
+regenerate `main.cf`. Run `sudo postfix-relay-rescue status` after upgrades.
 
-Snapshots include `main.cf`, SASL source/database maps, TLS policy
-source/database maps, and non-secret managed-state metadata.
+</details>
 
-## Files managed on the server
-
-```text
-/etc/postfix/main.cf
-/etc/postfix/sasl_passwd
-/etc/postfix/sasl_passwd.db
-/etc/postfix/relay_tls_policy
-/etc/postfix/relay_tls_policy.db
-<Postfix config directory>/postfix-relay-rescue.state
-/var/backups/postfix-relay-rescue/
-/var/lib/postfix-relay-rescue/
-/var/log/postfix-relay-rescue.log
-```
-
-The metadata state file does not contain the relay password. The Postfix
-configuration directory is discovered with `postconf`; the paths above show
-the common Debian/Ubuntu layout.
-
-## Configuration regeneration
-
-Mail-in-a-Box upgrades and other configuration-management systems can
-regenerate `main.cf`. After such a change, run:
+<details>
+<summary><strong>Development and privacy checks</strong></summary>
 
 ```bash
-sudo postfix-relay-rescue status
-```
+bash -n \
+  postfix-relay-rescue.sh \
+  tests/run-smoke.sh \
+  tests/mock-bin/prr-mock \
+  tests/privacy-scan.sh
 
-Reapply the sender-RHSBL bypass if the status command reports that authenticated
-users can again be rejected.
+shellcheck -x \
+  postfix-relay-rescue.sh \
+  tests/run-smoke.sh \
+  tests/mock-bin/prr-mock \
+  tests/privacy-scan.sh
 
-## Development
-
-Run local checks:
-
-```bash
-bash -n postfix-relay-rescue.sh tests/run-smoke.sh tests/mock-bin/prr-mock
-shellcheck -x postfix-relay-rescue.sh tests/run-smoke.sh tests/mock-bin/prr-mock
 bash tests/run-smoke.sh
+bash tests/privacy-scan.sh
 ```
 
-The smoke suite replaces Postfix, DNS, systemd, queue, and sendmail commands
-with temporary mocks. It verifies credential rotation, idempotence, automatic
-rollback, restored-map rebuilding, generic relay support, SPF lookup limits,
-DBL transitions, queue flushing, and relay removal.
+The smoke suite uses temporary mocks and never touches the host's live Postfix
+configuration.
 
-## Roadmap
+</details>
 
-- Evidence-oriented incident audit for Postfix/Dovecot logs.
-- Optional notification hooks for DBL state changes.
-- Additional relay-provider validation presets without storing credentials.
+## Scope
 
-## Contributing and security
+The project does not delist domains or IPs, edit authoritative DNS, guarantee
+inbox placement, support implicit-TLS port 465, or rewrite generated mail-stack
+configuration. Use the official
+[Spamhaus Reputation Checker](https://check.spamhaus.org/) for listing details
+and removal.
 
-Read [CONTRIBUTING.md](CONTRIBUTING.md), [SECURITY.md](SECURITY.md), and
-[CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) before opening a pull request.
+## Contributing
 
-Never attach real SMTP passwords, unredacted SASL maps, or private mail content
-to a public issue.
+See [CONTRIBUTING.md](CONTRIBUTING.md), [SECURITY.md](SECURITY.md), and
+[CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md).
 
-## Author
+## Author and license
 
-[Anton Babaskin](https://babaskin.dev/)
-
-## License
-
-[MIT](LICENSE)
+[Anton Babaskin](https://babaskin.dev/) · [MIT](LICENSE)

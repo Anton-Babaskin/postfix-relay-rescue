@@ -143,20 +143,6 @@ case "$name" in
     sendmail)
         exit 0
         ;;
-    getent)
-        [[ "${PRR_MOCK_DNS_FAIL:-0}" != "1" ]] || exit 2
-        [[ "${1:-}" == "ahosts" ]] || exit 2
-        printf '%s STREAM %s\n' \
-            '192.0.2.25' "$2" \
-            '2001:db8::25' "$2"
-        ;;
-    openssl)
-        [[ "${PRR_MOCK_STARTTLS_FAIL:-0}" != "1" ]] || {
-            printf 'mock STARTTLS handshake failed\n' >&2
-            exit 1
-        }
-        printf 'Verification: OK\n'
-        ;;
     *)
         exit 127
         ;;

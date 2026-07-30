@@ -11,6 +11,8 @@
 #   reject its own users before a configured relay ever sees the message.
 #
 # This script can:
+#   - preflight any hostname-based SMTP relay through DNS, TCP, STARTTLS, and
+#     certificate hostname validation without requesting relay credentials;
 #   - configure any hostname-based authenticated STARTTLS SMTP relay without
 #     replacing the host's global smtp_tls_security_level;
 #   - require TLS only for the relay through smtp_tls_policy_maps;
@@ -53,10 +55,6 @@ fi
 readonly MAILLOG="${PRR_MAILLOG:-$DEFAULT_MAILLOG}"
 readonly LOCK_FILE="${PRR_LOCK_FILE:-/run/lock/postfix-relay-rescue.lock}"
 unset DEFAULT_POSTFIX_DIR DETECTED_POSTFIX_DIR DEFAULT_MAILLOG
-
-readonly MAILBABY_HOST="relay.mailbaby.net"
-readonly MAILBABY_SPF="spf-c.mailbaby.net"
-readonly MAILBABY_SPF_LEGACY="relay.mailbaby.net"
 
 if [[ -t 1 && -z "${NO_COLOR:-}" ]]; then
     C_RED=$'\e[31m'
@@ -1008,6 +1006,9 @@ RELAY_DOMAIN=""
 RELAY_SPF_INCLUDE=""
 RELAY_SKIP_SPF="no"
 RELAY_ALLOW_NONLOOPBACK="no"
+PREFLIGHT_HOST=""
+PREFLIGHT_PORT=""
+PREFLIGHT_TIMEOUT="10"
 
 reset_relay_options() {
     RELAY_HOST=""
@@ -1046,7 +1047,139 @@ read_password_file() {
     RELAY_PASSWORD="${lines[0]}"
 }
 
+reset_preflight_options() {
+    PREFLIGHT_HOST=""
+    PREFLIGHT_PORT=""
+    PREFLIGHT_TIMEOUT="10"
+}
+
+parse_preflight_options() {
+    local configured_relay=""
+    local detected_host=""
+    local detected_port=""
+
+    reset_preflight_options
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --host)
+                require_option_value "$1" "$#"
+                PREFLIGHT_HOST="$2"
+                shift 2
+                ;;
+            --port)
+                require_option_value "$1" "$#"
+                PREFLIGHT_PORT="$2"
+                shift 2
+                ;;
+            --timeout)
+                require_option_value "$1" "$#"
+                PREFLIGHT_TIMEOUT="$2"
+                shift 2
+                ;;
+            *)
+                die "preflight: unknown option '$1'"
+                ;;
+        esac
+    done
+
+    configured_relay="$(postconf -h relayhost 2>/dev/null || true)"
+    detected_host="$(relay_hostname_from_nexthop "$configured_relay")"
+    if [[ -n "$detected_host" ]]; then
+        detected_port="$(relay_port_from_nexthop "$configured_relay")"
+    fi
+
+    if [[ -t 0 ]]; then
+        if [[ -z "$PREFLIGHT_HOST" ]]; then
+            local entered_host=""
+            if [[ -n "$detected_host" ]]; then
+                read -rp "Relay host [$detected_host]: " entered_host
+                PREFLIGHT_HOST="${entered_host:-$detected_host}"
+                if [[ "$PREFLIGHT_HOST" == "$detected_host" ]]; then
+                    PREFLIGHT_PORT="${PREFLIGHT_PORT:-$detected_port}"
+                fi
+            else
+                read -rp "Relay host: " PREFLIGHT_HOST
+            fi
+        fi
+        if [[ -z "$PREFLIGHT_PORT" ]]; then
+            read -rp "Relay STARTTLS port [587]: " PREFLIGHT_PORT
+            PREFLIGHT_PORT="${PREFLIGHT_PORT:-587}"
+        fi
+    else
+        PREFLIGHT_HOST="${PREFLIGHT_HOST:-$detected_host}"
+        if [[ "$PREFLIGHT_HOST" == "$detected_host" ]]; then
+            PREFLIGHT_PORT="${PREFLIGHT_PORT:-$detected_port}"
+        fi
+    fi
+
+    PREFLIGHT_PORT="${PREFLIGHT_PORT:-587}"
+    [[ -n "$PREFLIGHT_HOST" ]] \
+        || die "no relayhost detected; pass --host"
+    validate_relay_host "$PREFLIGHT_HOST" \
+        || die "invalid relay hostname: $PREFLIGHT_HOST"
+    validate_port "$PREFLIGHT_PORT" \
+        || die "invalid relay port: $PREFLIGHT_PORT"
+    [[ "$PREFLIGHT_PORT" != "465" ]] \
+        || die "port 465 uses implicit TLS and is not supported; use a STARTTLS port"
+    [[ "$PREFLIGHT_TIMEOUT" =~ ^[0-9]+$ ]] \
+        || die "preflight timeout must be an integer"
+    ((10#$PREFLIGHT_TIMEOUT >= 1 && 10#$PREFLIGHT_TIMEOUT <= 120)) \
+        || die "preflight timeout must be between 1 and 120 seconds"
+}
+
+cmd_preflight() {
+    validate_installation
+    parse_preflight_options "$@"
+    need_bin getent "install libc-bin or the platform package that provides getent"
+    need_bin openssl "install openssl"
+    need_bin timeout "install coreutils"
+
+    local addresses=""
+    local tls_output=""
+
+    hdr "Relay preflight"
+    say "target: [$PREFLIGHT_HOST]:$PREFLIGHT_PORT"
+
+    addresses="$(getent ahosts "$PREFLIGHT_HOST" 2>/dev/null \
+        | awk '{print $1}' \
+        | LC_ALL=C sort -u || true)"
+    if [[ -z "$addresses" ]]; then
+        fail "DNS resolution failed for $PREFLIGHT_HOST"
+        return 1
+    fi
+    ok "DNS resolution"
+    while IFS= read -r address; do
+        [[ -n "$address" ]] && say "  $address"
+    done <<<"$addresses"
+
+    if ! tls_output="$(
+        timeout "${PREFLIGHT_TIMEOUT}s" \
+            openssl s_client \
+                -starttls smtp \
+                -connect "$PREFLIGHT_HOST:$PREFLIGHT_PORT" \
+                -servername "$PREFLIGHT_HOST" \
+                -verify_hostname "$PREFLIGHT_HOST" \
+                -verify_return_error \
+                -brief \
+                </dev/null 2>&1
+    )"; then
+        fail "TCP/STARTTLS/certificate validation failed"
+        say "Check DNS, firewall rules, the selected port, and the relay certificate."
+        [[ -z "$tls_output" ]] || say "OpenSSL: ${tls_output##*$'\n'}"
+        return 1
+    fi
+
+    ok "TCP connection"
+    ok "SMTP STARTTLS"
+    ok "trusted certificate for $PREFLIGHT_HOST"
+    say "No credentials were sent and no Postfix configuration was changed."
+}
+
 parse_relay_options() {
+    local detected_host=""
+    local detected_port=""
+    local entered_host=""
+
     reset_relay_options
     while [[ $# -gt 0 ]]; do
         case "$1" in
@@ -1098,10 +1231,25 @@ parse_relay_options() {
         read_password_file "$RELAY_PASSWORD_FILE"
     fi
 
+    if [[ -z "$RELAY_HOST" ]]; then
+        detected_host="$(relay_hostname_from_nexthop "$(postconf -h relayhost 2>/dev/null || true)")"
+        if [[ -n "$detected_host" ]]; then
+            detected_port="$(relay_port_from_nexthop "$(postconf -h relayhost 2>/dev/null || true)")"
+        fi
+    fi
+
     if [[ -t 0 ]]; then
         if [[ -z "$RELAY_HOST" ]]; then
-            read -rp "Relay host (MailBaby: $MAILBABY_HOST) [$MAILBABY_HOST]: " RELAY_HOST
-            RELAY_HOST="${RELAY_HOST:-$MAILBABY_HOST}"
+            if [[ -n "$detected_host" ]]; then
+                read -rp "Relay host [$detected_host]: " entered_host
+                RELAY_HOST="${entered_host:-$detected_host}"
+                if [[ "$RELAY_HOST" == "$detected_host" ]]; then
+                    RELAY_PORT="${RELAY_PORT:-$detected_port}"
+                    say "using relay detected from Postfix: [$RELAY_HOST]:$RELAY_PORT"
+                fi
+            else
+                read -rp "Relay host: " RELAY_HOST
+            fi
         fi
         if [[ -z "$RELAY_PORT" ]]; then
             read -rp "Relay STARTTLS port [587]: " RELAY_PORT
@@ -1114,16 +1262,20 @@ parse_relay_options() {
             read -rsp "Relay password: " RELAY_PASSWORD
             printf '\n'
         fi
-        if [[ -z "$RELAY_SPF_INCLUDE" && "${RELAY_HOST,,}" != "$MAILBABY_HOST" ]]; then
+        if [[ -z "$RELAY_SPF_INCLUDE" ]]; then
             read -rp "Provider SPF include domain (optional): " RELAY_SPF_INCLUDE
             RELAY_SPF_INCLUDE="${RELAY_SPF_INCLUDE%.}"
         fi
     else
+        if [[ -z "$RELAY_HOST" && -n "$detected_host" ]]; then
+            RELAY_HOST="$detected_host"
+            RELAY_PORT="${RELAY_PORT:-$detected_port}"
+        fi
         RELAY_PORT="${RELAY_PORT:-587}"
     fi
 
     [[ -n "$RELAY_HOST" ]] \
-        || die "relay host is required non-interactively; pass --host"
+        || die "no relayhost detected; pass --host"
     [[ -n "$RELAY_USER" ]] || die "relay username is required"
     [[ -n "$RELAY_PASSWORD" ]] || die "relay password is required via prompt or --password-file"
     validate_relay_host "$RELAY_HOST" || die "invalid relay hostname: $RELAY_HOST"
@@ -1142,9 +1294,6 @@ parse_relay_options() {
         RELAY_DOMAIN=""
     fi
 
-    if [[ -z "$RELAY_SPF_INCLUDE" && "${RELAY_HOST,,}" == "$MAILBABY_HOST" ]]; then
-        RELAY_SPF_INCLUDE="$MAILBABY_SPF"
-    fi
     if [[ -n "$RELAY_SPF_INCLUDE" ]] && ! validate_domain "$RELAY_SPF_INCLUDE"; then
         die "invalid SPF include domain: $RELAY_SPF_INCLUDE"
     fi
@@ -1418,12 +1567,6 @@ spf_contains_include() {
     [[ " $spf " == *" include:$include "* ]]
 }
 
-mailbaby_spf_is_present() {
-    local spf="$1"
-    spf_contains_include "$spf" "$MAILBABY_SPF" \
-        || spf_contains_include "$spf" "$MAILBABY_SPF_LEGACY"
-}
-
 suggest_spf_record() {
     local current="$1"
     local include="$2"
@@ -1436,22 +1579,6 @@ suggest_spf_record() {
     else
         printf '%s include:%s' "$(trim "$current")" "$include"
     fi
-}
-
-mailbaby_origin_hint_present() {
-    local spf="$1"
-    local padded=" ${spf,,} "
-    [[ "$padded" == *" a "* || "$padded" == *" mx "* || "$padded" == *" ip4:"* || "$padded" == *" ip6:"* ]]
-}
-
-mailbaby_dns_authorization_present() {
-    local domain="$1"
-    local raw decoded
-    while IFS= read -r raw; do
-        decoded="$(decode_dig_txt_line "$raw")"
-        [[ "${decoded,,}" == v=1*" user=mb"* ]] && return 0
-    done < <(dig +time=4 +tries=1 +short TXT "_mailbaby.$domain" 2>/dev/null || true)
-    return 1
 }
 
 default_spf_suggestion() {
@@ -1502,13 +1629,7 @@ spf_report() {
     spf_lookup_budget_report "$domain" "$spf" || lookup_failed=1
 
     if [[ -n "$required_include" ]]; then
-        if [[ "${required_include,,}" == "$MAILBABY_SPF" ]] && mailbaby_spf_is_present "$spf"; then
-            if spf_contains_include "$spf" "$MAILBABY_SPF_LEGACY"; then
-                ok "MailBaby authorized through supported legacy include:$MAILBABY_SPF_LEGACY"
-            else
-                ok "MailBaby authorized through include:$MAILBABY_SPF"
-            fi
-        elif spf_contains_include "$spf" "$required_include"; then
+        if spf_contains_include "$spf" "$required_include"; then
             ok "relay SPF include is present: $required_include"
         else
             fail "missing include:$required_include"
@@ -1519,15 +1640,6 @@ spf_report() {
         fi
     fi
 
-    if [[ "${required_include,,}" == "$MAILBABY_SPF" ]]; then
-        if mailbaby_origin_hint_present "$spf"; then
-            ok "SPF contains an origin-server mechanism (a/mx/ip4/ip6)"
-        elif mailbaby_dns_authorization_present "$domain"; then
-            ok "_mailbaby TXT authorization is present"
-        else
-            warn "MailBaby also requires the origin server IP in SPF or a _mailbaby TXT authorization"
-        fi
-    fi
     ((lookup_failed == 0))
 }
 
@@ -1535,7 +1647,7 @@ AUDIT_DOMAIN=""
 AUDIT_SPF_INCLUDE=""
 
 resolve_audit_context() {
-    local relay host positional_domain=""
+    local relay positional_domain=""
     local requested_include=""
 
     while [[ $# -gt 0 ]]; do
@@ -1573,11 +1685,6 @@ resolve_audit_context() {
     fi
 
     AUDIT_DOMAIN="${AUDIT_DOMAIN:-$(primary_domain)}"
-    if [[ -z "$AUDIT_SPF_INCLUDE" && -n "$relay" ]]; then
-        host="$(relay_hostname_from_nexthop "$relay")"
-        [[ "${host,,}" == "$MAILBABY_HOST" ]] && AUDIT_SPF_INCLUDE="$MAILBABY_SPF"
-    fi
-
     validate_domain "$AUDIT_DOMAIN" || die "invalid domain: $AUDIT_DOMAIN"
     if [[ -n "$AUDIT_SPF_INCLUDE" ]]; then
         validate_domain "$AUDIT_SPF_INCLUDE" \
@@ -1951,11 +2058,9 @@ cmd_status() {
         if load_managed_state && [[ "$STATE_RELAY_NEXTHOP" == "$relay" ]]; then
             say "  sending domain: ${STATE_RELAY_DOMAIN:-<not recorded>}"
             say "  provider SPF include: ${STATE_SPF_INCLUDE:-<not recorded>}"
-        elif [[ "$(relay_hostname_from_nexthop "$relay")" == "$MAILBABY_HOST" ]]; then
-            say "  provider: MailBaby (auto-detected)"
-            say "  provider SPF include: $MAILBABY_SPF"
         else
-            warn "relay metadata is not recorded; use --spf-include for a generic provider audit"
+            warn "relay detected from Postfix, but SPF metadata is not recorded"
+            say "  use --spf-include with the value documented by your relay provider"
         fi
     else
         say "  relayhost: <empty> — direct delivery"
@@ -2017,10 +2122,28 @@ validate_email_address() {
 
 relay_hostname_from_nexthop() {
     local relay="$1"
-    relay="${relay#\[}"
-    relay="${relay%%\]*}"
-    relay="${relay%%:*}"
-    printf '%s' "$relay"
+    relay="${relay#smtp:}"
+
+    if [[ "$relay" =~ ^\[([^]]+)\](:([0-9]+))?$ ]]; then
+        printf '%s' "${BASH_REMATCH[1]}"
+    elif [[ "$relay" =~ ^([^:]+):([0-9]+)$ ]]; then
+        printf '%s' "${BASH_REMATCH[1]}"
+    elif [[ "$relay" != *:* ]]; then
+        printf '%s' "$relay"
+    fi
+}
+
+relay_port_from_nexthop() {
+    local relay="$1"
+    relay="${relay#smtp:}"
+
+    if [[ "$relay" =~ ^\[([^]]+)\](:([0-9]+))?$ ]]; then
+        printf '%s' "${BASH_REMATCH[3]:-25}"
+    elif [[ "$relay" =~ ^([^:]+):([0-9]+)$ ]]; then
+        printf '%s' "${BASH_REMATCH[2]}"
+    elif [[ "$relay" != *:* && -n "$relay" ]]; then
+        printf '25'
+    fi
 }
 
 cmd_test() {
@@ -2158,6 +2281,7 @@ postfix-relay-rescue.sh v$VERSION
 
 Usage:
   $0                         interactive menu
+  $0 preflight [options]     verify relay DNS, TCP, STARTTLS, and certificate
   $0 setup [relay options]   configure relay + safe sender-RHSBL bypass
   $0 relay-on [options]      configure authenticated SMTP relay
   $0 relay-off [--purge-credentials]
@@ -2165,7 +2289,7 @@ Usage:
   $0 status [domain] [--spf-include DOMAIN]
                              DBL, ZEN, SPF, Postfix, maps, queue
   $0 spf [domain] [--spf-include DOMAIN]
-                             SPF audit for MailBaby or any relay provider
+                             SPF audit for any relay provider
   $0 watch [domain] [--flush-on-delist] [--verbose]
                              cron-friendly DBL state-change watcher
   $0 test [recipient] [--from address] [--timeout 90]
@@ -2174,25 +2298,29 @@ Usage:
   $0 help
 
 Relay options:
-  --host HOST                any authenticated STARTTLS relay hostname;
-                             interactive MailBaby default: $MAILBABY_HOST
-  --port PORT                STARTTLS port, default: 587
+  --host HOST                authenticated STARTTLS relay hostname;
+                             existing Postfix relayhost is auto-detected
+  --port PORT                STARTTLS port; detected from relayhost or 587
   --user USER
   --password-file FILE       root-owned regular file, exactly mode 0400/0600,
                              containing one password line
   --domain DOMAIN            sending domain used for SPF audit
-  --spf-include DOMAIN       provider-supplied SPF include; MailBaby is
-                             auto-detected as $MAILBABY_SPF
+  --spf-include DOMAIN       provider-supplied SPF include; never guessed
   --skip-spf-check
   --allow-nonloopback-mynetworks
+
+Preflight options:
+  --host HOST                relay hostname; active relayhost if omitted
+  --port PORT                STARTTLS port; detected from relayhost or 587
+  --timeout SECONDS          connection timeout, 1-120 (default: 10)
 
 Compatibility aliases:
   --setup, --relay, --disable, --bypass, --check, --test, --rollback
 
 Important:
   - Passwords are never accepted as command-line arguments.
+  - If --host is omitted, the active Postfix relayhost is reused when valid.
   - Re-running relay-on replaces the credential for that exact host:port key.
-  - MailBaby legacy include:$MAILBABY_SPF_LEGACY is recognized as valid.
   - Snapshots include main.cf, credentials/maps, TLS policy/maps, and metadata.
   - watch exit codes: 10 listed, 11 delisted, 12 DNS error, 13 recovered.
   - 'status=sent' means accepted by the next hop, not guaranteed inbox delivery.
@@ -2215,6 +2343,7 @@ main_menu() {
 
     local opt
     select opt in \
+        "Preflight SMTP relay" \
         "Configure SMTP relay" \
         "Apply safe Spamhaus DBL bypass" \
         "Configure relay + DBL bypass" \
@@ -2225,19 +2354,20 @@ main_menu() {
         "Quit"
     do
         if [[ -z "$opt" ]]; then
-            warn "choose 1-8"
+            warn "choose 1-9"
             continue
         fi
         case "$REPLY" in
-            1) run_menu_child relay-on ;;
-            2) run_menu_child fix-submission ;;
-            3) run_menu_child setup ;;
-            4) run_menu_child status ;;
-            5) run_menu_child test ;;
-            6) run_menu_child restore ;;
-            7) run_menu_child relay-off ;;
-            8) break ;;
-            *) warn "choose 1-8" ;;
+            1) run_menu_child preflight ;;
+            2) run_menu_child relay-on ;;
+            3) run_menu_child fix-submission ;;
+            4) run_menu_child setup ;;
+            5) run_menu_child status ;;
+            6) run_menu_child test ;;
+            7) run_menu_child restore ;;
+            8) run_menu_child relay-off ;;
+            9) break ;;
+            *) warn "choose 1-9" ;;
         esac
         say ""
     done
@@ -2255,6 +2385,9 @@ command_name="${1:-}"
 [[ $# -gt 0 ]] && shift
 
 case "$command_name" in
+    preflight)
+        cmd_preflight "$@"
+        ;;
     setup|--setup|-s)
         cmd_setup "$@"
         ;;

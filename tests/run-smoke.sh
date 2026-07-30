@@ -8,7 +8,7 @@ trap 'rm -rf "$tmp"' EXIT
 mkdir -p "$tmp/postfix" "$tmp/bin" "$tmp/backups" "$tmp/run" "$tmp/watch"
 cp "$root/tests/fixtures/main.cf" "$tmp/postfix/main.cf"
 
-for command in postconf postmap postfix systemctl dpkg-query dig postqueue ip hostname sendmail; do
+for command in postconf postmap postfix systemctl dpkg-query dig postqueue ip hostname sendmail getent openssl; do
     ln -s "$root/tests/mock-bin/prr-mock" "$tmp/bin/$command"
 done
 
@@ -30,6 +30,25 @@ chmod 600 "$tmp/postfix/sasl_passwd"
 printf 'super-secret\n' >"$tmp/password"
 chmod 600 "$tmp/password"
 
+bash "$root/postfix-relay-rescue.sh" preflight \
+    --host smtp.relay.example \
+    --port 587 \
+    --timeout 5 >/dev/null
+
+if PRR_MOCK_DNS_FAIL=1 bash "$root/postfix-relay-rescue.sh" preflight \
+    --host smtp.relay.example \
+    --port 587 >/dev/null 2>&1; then
+    printf 'relay preflight unexpectedly passed with failed DNS\n' >&2
+    exit 1
+fi
+
+if PRR_MOCK_STARTTLS_FAIL=1 bash "$root/postfix-relay-rescue.sh" preflight \
+    --host smtp.relay.example \
+    --port 587 >/dev/null 2>&1; then
+    printf 'relay preflight unexpectedly passed with failed STARTTLS\n' >&2
+    exit 1
+fi
+
 printf '%s\n' \
     'submission inet n - y - - smtpd' \
     '  -o smtpd_sender_restrictions=reject_rhsbl_sender,dbl.spamhaus.org' \
@@ -41,34 +60,38 @@ fi
 rm "$tmp/postfix/master.cf"
 
 bash "$root/postfix-relay-rescue.sh" setup \
-    --host relay.mailbaby.net \
+    --host smtp.relay.example \
     --port 587 \
-    --user mb12345 \
+    --user relay-user \
     --password-file "$tmp/password" \
-    --domain example.com
+    --domain example.com \
+    --spf-include spf.relay.example
 
 grep -q 'permit_sasl_authenticated,permit_mynetworks,reject_rhsbl_sender' "$tmp/postfix/main.cf"
 grep -q '^old-relay.example ' "$tmp/postfix/sasl_passwd"
-grep -q '^\[relay.mailbaby.net\]:587 mb12345:super-secret$' "$tmp/postfix/sasl_passwd"
-grep -q '^\[relay.mailbaby.net\]:587[[:space:]]encrypt$' "$tmp/postfix/relay_tls_policy"
-grep -q $'^relay_nexthop\t\\[relay.mailbaby.net\\]:587$' "$tmp/postfix/postfix-relay-rescue.state"
+grep -q '^\[smtp.relay.example\]:587 relay-user:super-secret$' "$tmp/postfix/sasl_passwd"
+grep -q '^\[smtp.relay.example\]:587[[:space:]]encrypt$' "$tmp/postfix/relay_tls_policy"
+grep -q $'^relay_nexthop\t\\[smtp.relay.example\\]:587$' "$tmp/postfix/postfix-relay-rescue.state"
 grep -q $'^sending_domain\texample.com$' "$tmp/postfix/postfix-relay-rescue.state"
-grep -q $'^spf_include\tspf-c.mailbaby.net$' "$tmp/postfix/postfix-relay-rescue.state"
+grep -q $'^spf_include\tspf.relay.example$' "$tmp/postfix/postfix-relay-rescue.state"
 grep -q '^smtp_tls_security_level = dane$' "$tmp/postfix/main.cf"
 grep -q 'hash:.*/relay_tls_policy' "$tmp/postfix/main.cf"
+bash "$root/postfix-relay-rescue.sh" preflight --timeout 5 >/dev/null
 bash "$root/postfix-relay-rescue.sh" status example.com >/dev/null
-PRR_MOCK_SPF_RECORD='v=spf1 a mx include:relay.mailbaby.net -all' \
-    bash "$root/postfix-relay-rescue.sh" spf example.com >/dev/null
+PRR_MOCK_SPF_RECORD='v=spf1 a mx include:spf.relay.example -all' \
+    bash "$root/postfix-relay-rescue.sh" spf example.com \
+        --spf-include spf.relay.example >/dev/null
 
 printf 'rotated-secret\n' >"$tmp/password-rotated"
 chmod 600 "$tmp/password-rotated"
+# --host and --port are intentionally omitted: the active Postfix relayhost
+# must be detected and reused without any provider-specific logic.
 bash "$root/postfix-relay-rescue.sh" relay-on \
-    --host relay.mailbaby.net \
-    --port 587 \
-    --user mb12345 \
+    --user relay-user \
     --password-file "$tmp/password-rotated" \
-    --domain example.com
-grep -q '^\[relay.mailbaby.net\]:587 mb12345:rotated-secret$' "$tmp/postfix/sasl_passwd"
+    --domain example.com \
+    --spf-include spf.relay.example
+grep -q '^\[smtp.relay.example\]:587 relay-user:rotated-secret$' "$tmp/postfix/sasl_passwd"
 if grep -q 'super-secret' "$tmp/postfix/sasl_passwd"; then
     printf 'old relay password survived an exact-key credential rotation\n' >&2
     exit 1
@@ -101,11 +124,10 @@ rollback_after="$(sha256sum \
 
 before="$(sha256sum "$tmp/postfix/main.cf" "$tmp/postfix/sasl_passwd" "$tmp/postfix/relay_tls_policy")"
 bash "$root/postfix-relay-rescue.sh" setup \
-    --host relay.mailbaby.net \
-    --port 587 \
-    --user mb12345 \
+    --user relay-user \
     --password-file "$tmp/password-rotated" \
-    --domain example.com
+    --domain example.com \
+    --spf-include spf.relay.example
 after="$(sha256sum "$tmp/postfix/main.cf" "$tmp/postfix/sasl_passwd" "$tmp/postfix/relay_tls_policy")"
 [[ "$before" == "$after" ]]
 
@@ -167,7 +189,7 @@ bash "$root/postfix-relay-rescue.sh" relay-off --purge-credentials
 grep -q '^relayhost = $' "$tmp/postfix/main.cf"
 grep -q '^smtp_tls_security_level = dane$' "$tmp/postfix/main.cf"
 grep -q '^old-relay.example ' "$tmp/postfix/sasl_passwd"
-grep -q 'relay.mailbaby.net' "$tmp/postfix/sasl_passwd"
+grep -q 'smtp.relay.example' "$tmp/postfix/sasl_passwd"
 if grep -q 'smtp.generic.example' "$tmp/postfix/sasl_passwd"; then
     printf 'active generic relay credential was not purged\n' >&2
     exit 1
